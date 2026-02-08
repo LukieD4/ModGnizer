@@ -1,0 +1,4 @@
+colorama
+send2trash
+requests
+PyQT5

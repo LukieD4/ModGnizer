@@ -1,0 +1,6 @@
+\.venv
+\__pycache__
+\build_windows
+\program.ico
+files.txt
+get all files with contents.py
