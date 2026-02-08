@@ -42,10 +42,24 @@ class App:
         }
     }
 
-    def __init__(self):
-        self.build_id, self.IS_FIRST_TIME_SETUP = (
-            self.load_or_init_build_id() if not self.DEBUG else (-1, True)
+    @staticmethod
+    def is_running_as_exe():
+        """Check if the script is running as a compiled EXE (Nuitka specific)."""
+        # For Nuitka: both 'frozen' and 'compiled' are True
+        # For PyInstaller: 'frozen' is True and '_MEIPASS' exists
+        return (
+            getattr(sys, 'frozen', False) and 
+            (getattr(sys, 'compiled', False) or hasattr(sys, '_MEIPASS'))
         )
+
+    def __init__(self):
+        # Skip build ID handling if running as EXE
+        if self.is_running_as_exe():
+            self.build_id = 0
+            self.IS_FIRST_TIME_SETUP = False
+        else:
+            self.build_id, self.IS_FIRST_TIME_SETUP = self.load_or_init_build_id()
+        
         self.operation_text = None
         self.refresh_main_menu()
 
@@ -461,7 +475,7 @@ class App:
         self.refresh_main_menu()
         self.cls()
         
-        print(Fore.WHITE + f" // ModGnizer (b{self.build_id}) //\nby @LukieD4 on GitHub\n")
+        print(Fore.WHITE + f" // (ModGnizer) //\nby @LukieD4 on GitHub\n")
         print(Style.BRIGHT + self.MENU_TITLE)
         
         for key, (label, _) in self.menu_modes.items():
