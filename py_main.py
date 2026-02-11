@@ -4,6 +4,7 @@ from py_archive import ArchiveBundler
 from py_undbj import UnDBJ
 from py_tmpfiles import TmpFilesClient, TmpFilesError
 from py_report import review_and_install
+from py_updater import check_for_updates
 import winreg, send2trash, shutil
 
 # -------------------------
@@ -14,7 +15,7 @@ init(autoreset=True)
 
 
 class App:
-    DEBUG = False
+    
     VERSION_FILE = "buildId.version"
     MENU_TITLE = "Main Menu"
     DIVIDER = "-- -x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x- --"
@@ -44,21 +45,28 @@ class App:
 
     @staticmethod
     def is_running_as_exe():
-        """Check if the script is running as a compiled EXE (Nuitka specific)."""
-        # For Nuitka: both 'frozen' and 'compiled' are True
-        # For PyInstaller: 'frozen' is True and '_MEIPASS' exists
-        return (
-            getattr(sys, 'frozen', False) and 
-            (getattr(sys, 'compiled', False) or hasattr(sys, '_MEIPASS'))
-        )
+        if "__compiled__" in globals():
+            return True
+        return False
+    
+    @staticmethod
+    def get_runtime_base():
+        return Path(__file__).parent
+
 
     def __init__(self):
+        self.debug = False
+        self.log = None
+
         # Skip build ID handling if running as EXE
         if self.is_running_as_exe():
-            self.build_id = 0
-            self.IS_FIRST_TIME_SETUP = False
-        else:
-            self.build_id, self.IS_FIRST_TIME_SETUP = self.load_or_init_build_id()
+            check_for_updates(self.get_runtime_base() / self.VERSION_FILE)
+        
+        # Check for updates and ask user consent
+        user_accepted_update = check_for_updates(self.get_runtime_base() / self.VERSION_FILE, lambda:self.get_consent("\n\n\n\n\nA new version is available. Do you want to update")) if self.is_running_as_exe() else False
+        if not user_accepted_update: self.cls()
+        
+        self.build_id, self.IS_FIRST_TIME_SETUP = self.load_or_init_build_id()
         
         self.operation_text = None
         self.refresh_main_menu()
@@ -67,45 +75,94 @@ class App:
         """Refresh the main menu with updated temp cache size"""
         _, temp_bytes = self.get_modgnizer_temp_info()
         self.menu_main_definition = {
-            "1": ("Load *MODS* from an ARCHIVE (or link)", "menu_load_mods_from_archive"),
-            "2": ("Bundle *MODS* to an ARCHIVE", "menu_bundle_mods_to_archive"),
-            "3": (f"Clear temp cache ({self.format_bytes(temp_bytes)})", "menu_clear_temp_cache"),
-            "#": ("Quit", "menu_quit"),
+            "1": ("Load *MODS* from an ARCHIVE (or link)",                  "menu_load_mods_from_archive"),
+            "2": ("Bundle *MODS* to an ARCHIVE",                            "menu_bundle_mods_to_archive"),
+            "3": (f"Clear temp cache ({self.format_bytes(temp_bytes)})",    "menu_clear_temp_cache"),
+            "4": ("Log errors",                                             "menu_toggle_error_logging"),
+            "#": ("Quit",                                                   "menu_quit"),
         }
         self.menu_modes = {
             key: (label, getattr(self, handler))
             for key, (label, handler) in self.menu_main_definition.items()
         }
+    
+    def menu_toggle_error_logging(self):
+        if self.debug: return True
+        self.debug = True
+
+        import logging
+
+        logging.basicConfig(
+            filename="err.log",
+            level=logging.INFO,
+            format="%(asctime)s | %(levelname)s | %(message)s",
+            filemode="w"
+        )
+
+        self.log = logging.getLogger(f"ModGnizer {self.build_id}")
+
+        self._log("Started", "info")
+
+        self.operation_text = "Error logging ENABLED."
+        self.refresh_main_menu()
+        return True
+
+    def _log(self, msg, level="info"):
+        if not self.log: return
+
+        level = level.lower()
+
+        if level == "info":
+            self.log.info(msg)
+        elif level == "warning":
+            self.log.warning(msg)
+        elif level == "error":
+            self.log.error(msg)
+        elif level == "debug":
+            self.log.debug(msg)
+        else:
+            self.log.info(msg)
+
 
     # -------------------------
     # region CLEAR SCREEN
     # -------------------------
     def cls(self):
-        if not self.DEBUG:
+        if not self.debug:
             os.system("cls")
 
     # -------------------------
     # region VERSION HANDLING
     # -------------------------
     def load_or_init_build_id(self):
-        if not os.path.exists(self.VERSION_FILE):
-            print(Fore.BLUE + "First‑time setup detected.\nRunning initial configuration...")
-            with open(self.VERSION_FILE, "w") as f:
-                f.write("1")
+        self._log("IN -> load_or_init_build_id", "info")
+
+        version_path = self.get_runtime_base() / self.VERSION_FILE
+
+        # DEV MODE (.py)
+        if not version_path.exists() and not self.is_running_as_exe():
+            print(Fore.BLUE + "First-time setup detected.\n (reserved)...")
+            version_path.write_text("1", encoding="utf-8")
             return 1, True
 
-        with open(self.VERSION_FILE) as f:
-            new_id = int(f.read().strip()) + 1
-        
-        with open(self.VERSION_FILE, "w") as f:
-            f.write(str(new_id))
-        
+        # EXE MODE (Nuitka onefile)
+        if self.is_running_as_exe():
+            try:
+                return int(version_path.read_text().strip()), False
+            except Exception:
+                return 0, False
+
+        # DEV MODE increment logic
+        new_id = int(version_path.read_text().strip()) + 1
+        version_path.write_text(str(new_id), encoding="utf-8")
         return new_id, False
 
     # -------------------------
     # region MENU HANDLERS
     # -------------------------
     def menu_clear_temp_cache(self):
+        self._log("IN -> menu_clear_temp_cache","info")
+
         temp_path, temp_bytes = self.get_modgnizer_temp_info()
         
         if temp_bytes == 0:
@@ -126,6 +183,8 @@ class App:
         return True
 
     def menu_load_mods_from_archive(self):
+        self._log("IN -> menu_load_mods_from_archive","info")
+
         source = self.get_archive_source()
         if not source:
             return True
@@ -137,6 +196,7 @@ class App:
             try:
                 manifest = TmpFilesClient.parse_modgnizer_manifest(value)
             except Exception as e:
+                self._log(e,"critical")
                 self.operation_text = Fore.RED + str(e)
                 return True
             
@@ -152,6 +212,7 @@ class App:
                 downloaded = client.download_from_paste(manifest)
                 archive_path = downloaded[0]
             except Exception as e:
+                self._log(e,"critical")
                 self.operation_text = Fore.RED + f"Download failed: {e}"
                 return True
         
@@ -166,6 +227,7 @@ class App:
         try:
             extracted_path = ArchiveBundler.extract_archive(archive_path, password=password)
         except Exception as e:
+            self._log(e,"critical")
             exit_code = e.args[0]
             def get_conclusion():
                 match exit_code:
@@ -209,11 +271,14 @@ class App:
                 lambda text: setattr(self, "operation_text", text)
             )
         except Exception as e:
+            self._log(e,"critical")
             self.operation_text = Fore.RED + f"Review/install step failed: {e}"
         
         return True
 
     def menu_bundle_mods_to_archive(self):
+        self._log("IN -> menu_bundle_mods_to_archive", "info")
+
         # Get mod manager and profile
         chosen_mod_manager = self.get_mod_managers()
         if not chosen_mod_manager:
@@ -253,9 +318,11 @@ class App:
         try:
             format_handlers[archive_prefs["format"]]()
         except FileNotFoundError as e:
+            self._log(e,"critical")
             self.operation_text = Fore.RED + f"Required tool not found: {e}"
             return True
         except Exception as e:
+            self._log(e,"critical")
             self.operation_text = Fore.RED + f"Unexpected error: {e}" if not "10" in str(e.args[0]) else Fore.RED + f"Error: Mod Profile '{chosen_profile["name"]}' contains no mods to bundle."
             return True
 
@@ -265,11 +332,13 @@ class App:
         try:
             self.get_consent_upload_to_fileio(output_path)
         except Exception as e:
+            self._log(e,"critical")
             self.operation_text = Fore.RED + f"Upload step failed: {e}"
         
         return True
 
     def menu_quit(self):
+        self._log("IN -> menu_quit", "info")
         print(Fore.WHITE + "Goodbye.")
         return False
 
@@ -277,6 +346,8 @@ class App:
     # region GETTER MENUS
     # -------------------------
     def get_mod_managers(self):
+        self._log("GET -> get_mod_managers", "info")
+
         print(Style.BRIGHT + "\n**Select your Mod Manager:**\n")
         
         managers = self.detect_mod_managers()
@@ -294,6 +365,8 @@ class App:
         return None if choice is None else manager_list[choice - 1][1]
 
     def get_mod_profiles(self, chosen_mod_manager):
+        self._log("GET -> get_mod_profiles", "info")
+
         undb = UnDBJ(chosen_mod_manager["db_path"])
         profiles = undb.get_internal_profiles()
         
@@ -312,6 +385,8 @@ class App:
         return None if choice is None else profiles[choice - 1]
 
     def get_archive_preferences(self):
+        self._log("GET -> get_archive_preferences", "info")
+
         bundler = ArchiveBundler(Path("."))
         available = {"1": "zip"}
         
@@ -345,6 +420,8 @@ class App:
         return {"format": fmt, "password": password}
 
     def get_archive_source(self):
+        self._log("GET -> get_archive_source", "info")
+
         print(Style.BRIGHT + "\n**Load MODS from:**\n")
         print(Fore.LIGHTBLACK_EX + "1. Read from clipboard (MODGNIZER shared text)")
         print(Fore.LIGHTBLACK_EX + "2. Local archive file")
@@ -382,6 +459,7 @@ class App:
                 
                 return ("local", Path(file_path))
             except Exception as e:
+                self._log(e,"critical")
                 self.operation_text = Fore.RED + f"Failed to open file dialog: {e}"
                 return None
         
@@ -389,6 +467,8 @@ class App:
         return None
 
     def get_consent(self, message: str):
+        self._log("GET (CONSENT) -> get_consent", "info")
+
         print("\n" + Fore.YELLOW + f"{message}? (y/n)")
         choice = input(Fore.YELLOW + "> ").strip().lower()
         
@@ -401,6 +481,8 @@ class App:
         return False
 
     def get_consent_delete_file(self, file_path: Path):
+        self._log("GET (CONSENT) -> get_consent_delete_file", "info")
+
         if not file_path.exists():
             return True
         
@@ -417,10 +499,13 @@ class App:
             print(Fore.BLUE + "Existing file moved to Recycle Bin.")
             return True
         except Exception as e:
+            self._log(e,"critical")
             self.operation_text = Fore.RED + f"Failed to delete file: {e}"
             return False
 
     def get_consent_upload_to_fileio(self, archive_path: Path):
+        self._log("GET (CONSENT) -> get_consent_upload_to_fileio", "info")
+
         if not archive_path.exists() or not archive_path.is_file():
             self.operation_text = Fore.RED + "Archive not found for upload."
             return
@@ -454,11 +539,15 @@ class App:
                 print(Fore.LIGHTBLACK_EX + "\nTip: Send the copied text to your friend.")
                 print(Fore.LIGHTBLACK_EX + "They can paste it directly into ModGnizer.")
         except TmpFilesError as e:
+            self._log(e,"critical")
             self.operation_text = Fore.RED + "Upload failed:" + Fore.LIGHTBLACK_EX + str(e)
         except Exception as e:
+            self._log(e,"critical")
             self.operation_text = Fore.RED + f"Unexpected error during upload: {e}"
 
     def get_modgnizer_temp_info(self):
+        self._log("GET -> get_modgnizer_temp_info", "info")
+
         temp_root = Path(os.environ.get("TEMP", Path.home() / "AppData/Local/Temp"))
         temp_dir = temp_root / "ModGnizer"
         
@@ -472,10 +561,14 @@ class App:
     # region MAIN MENU
     # -------------------------
     def menu(self):
+        self._log(" -> menu", "info")
+
         self.refresh_main_menu()
         self.cls()
-        
-        print(Fore.WHITE + f" // (ModGnizer) //\nby @LukieD4 on GitHub\n")
+
+        os.system(f"title ModGnizer v{self.build_id}")
+
+        print(Fore.WHITE + f" // (Version {self.build_id}) //\nby @LukieD4 on GitHub\n")
         print(Style.BRIGHT + self.MENU_TITLE)
         
         for key, (label, _) in self.menu_modes.items():
@@ -497,6 +590,7 @@ class App:
     # region UTILS
     # -------------------------
     def detect_installed_app(self, registry_paths):
+        self._log("DETECT -> detect_installed_app", "info")
         for reg_path in registry_paths:
             try:
                 with winreg.OpenKey(winreg.HKEY_CURRENT_USER, reg_path):
@@ -506,6 +600,8 @@ class App:
         return False, None
 
     def detect_mod_managers(self):
+        self._log("DETECT -> detect_mod_managers", "info")
+
         mod_managers = {}
         
         for name, registry_paths in self.REGISTRY_MAP.items():
@@ -529,6 +625,8 @@ class App:
         return {k: v for k, v in mod_managers.items() if v["installed"]}
 
     def save_links_md_and_copy_to_clipboard(self, links: list[str], original_file: Path):
+        self._log("SAVE -> save_links_md_and_copy_to_clipboard", "info")
+
         if not links:
             return
         
@@ -581,23 +679,30 @@ Date of modlist: {timestamp}*
         self.operation_text = f"Copied links to clipboard. Share it with your friends!\n{md_path}"
 
     def read_from_clipboard(self):
+        self._log("READ -> read_from_clipboard", "info")
+
         app = QApplication.instance() or QApplication(sys.argv)
         text = app.clipboard().text()
         return text if text and text.strip() else None
 
     def reveal_in_explorer(self, path: Path):
+        self._log("OPEN -> reveal_in_explorer", "info")
         try:
             os.startfile(path.parent if path.exists() else str(path))
         except Exception as e:
+            self._log(e,"critical")
             print(Fore.RED + f"Failed to open File Explorer: {e}")
     
     def reveal_in_notepad(self, path: Path):
+        self._log("OPEN -> reveal_in_notepad", "info")
         try:
             os.startfile(path)
         except Exception as e:
+            self._log(e,"critical")
             print(Fore.RED + f"Failed to open Notepad: {e}")
 
     def clear_modgnizer_temp(self):
+        self._log("DELETE -> clear_modgnizer_temp", "info")
         temp_root = Path(os.environ.get("TEMP", Path.home() / "AppData/Local/Temp"))
         temp_dir = temp_root / "ModGnizer"
         
@@ -609,10 +714,12 @@ Date of modlist: {timestamp}*
             self.operation_text = "Temp cache cleared successfully."
             return True
         except Exception as e:
+            self._log(e,"critical")
             self.operation_text = f"Failed to clear temp cache: {e}"
             return False
 
     def format_bytes(self, size: int):
+        self._log("FORMAT -> format_bytes", "info")
         for unit in ("B", "KB", "MB", "GB"):
             if size < 1024:
                 return f"{size:.1f} {unit}"
@@ -621,6 +728,7 @@ Date of modlist: {timestamp}*
 
     def _get_numeric_input(self, max_value: int):
         """Helper to get numeric input within range"""
+        self._log("INPUT -> _get_numeric_input", "info")
         choice = input(Fore.WHITE + "> ").strip()
         if not choice.isdigit() or not (1 <= int(choice) <= max_value):
             self.operation_text = Fore.RED + "Invalid selection."
