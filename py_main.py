@@ -45,25 +45,33 @@ class App:
 
     @staticmethod
     def is_running_as_exe():
+        # return True
         if "__compiled__" in globals():
             return True
         return False
     
     @staticmethod
     def get_runtime_base():
+        if "__compiled__" in globals():
+            return Path(sys.argv[0]).resolve().parent
         return Path(__file__).parent
+    
+    @staticmethod
+    def get_temp_runtime_base():
+        # Always points to the debundled folder when running as EXE
+        return Path(__file__).resolve().parent
+
 
 
     def __init__(self):
         self.debug = False
         self.log = None
-
-        # Skip build ID handling if running as EXE
-        if self.is_running_as_exe():
-            check_for_updates(self.get_runtime_base() / self.VERSION_FILE)
         
         # Check for updates and ask user consent
-        user_accepted_update = check_for_updates(self.get_runtime_base() / self.VERSION_FILE, lambda:self.get_consent("\n\n\n\n\nA new version is available. Do you want to update")) if self.is_running_as_exe() else False
+        user_accepted_update = check_for_updates(
+            self.get_runtime_base() / self.VERSION_FILE,
+            lambda:self.get_consent("\n\n\n\n\nA new version is available. Do you want to update")
+        ) if self.is_running_as_exe() else False
         if not user_accepted_update: self.cls()
         
         self.build_id, self.IS_FIRST_TIME_SETUP = self.load_or_init_build_id()
@@ -137,7 +145,7 @@ class App:
     def load_or_init_build_id(self):
         self._log("IN -> load_or_init_build_id", "info")
 
-        version_path = self.get_runtime_base() / self.VERSION_FILE
+        version_path = self.get_temp_runtime_base() / self.VERSION_FILE
 
         # DEV MODE (.py)
         if not version_path.exists() and not self.is_running_as_exe():

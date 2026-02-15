@@ -1,0 +1,64 @@
+Copyright (c) 2026 Callum K. (aka “LukieD4”)
+
+Permission is granted to any individual to use, study, modify, and create
+derivative works of this software (the “Work”) for strictly
+non-commercial purposes only, subject to the following conditions:
+
+1. Attribution Requirement  
+   All uses, modifications, and derivative works must include clear,
+   visible, and unambiguous attribution to the original author, Callum K.
+   Attribution must appear in a user-facing location such as a splash
+   screen or about page, occupying no less than five percent (5%) of the
+   total window or display area. Attribution may not be removed,
+   minimized, obscured, or relocated to a non-visible location.
+
+2. Redistribution Prohibited  
+   Redistribution of the Work, in whole or in part, modified or
+   unmodified, is strictly prohibited unless performed directly and
+   explicitly by the original author. No third party is permitted to
+   upload, mirror, publish, distribute, or otherwise make the Work
+   available to others.
+
+3. Bundling Restrictions  
+   Bundling or aggregation of the Work with any other software, media,
+   or distribution package is permitted only if:
+     (a) full attribution is preserved as described above, and  
+     (b) no party involved in the bundling, distribution, hosting, or
+         promotion of the bundle receives any monetary gain, direct or
+         indirect, including but not limited to sales, ads, donations,
+         sponsorships, subscriptions, or paywalled access.
+
+4. No Commercial or Monetizable Use  
+   The Work may not be used in any monetizable, revenue-generating,
+   profit-seeking, or financially beneficial context. This includes,
+   without limitation: selling the Work; selling access to the Work;
+   using the Work in paid products or services; hosting the Work on
+   ad-supported platforms; using the Work to solicit donations; or
+   incorporating the Work into any system, service, or environment that
+   generates revenue for any party.
+
+5. No Relicensing  
+   No derivative work, modification, fork, or adaptation may be
+   distributed or published under any license other than this one. No
+   sublicensing, relicensing, or application of additional terms is
+   permitted.
+
+6. No Obfuscation or Removal of Authorship  
+   The Work, including derivative works, may not be obfuscated,
+   encrypted, minified, or otherwise altered in a manner intended to
+   conceal, obscure, or remove the author’s identity, comments, file
+   structure, or other indicators of authorship.
+
+7. Anti-Circumvention of Older Versions  
+   Any attempt to use, distribute, or rely upon earlier versions of the
+   Work for the purpose of bypassing or avoiding the restrictions of
+   this license constitutes a violation of this license. All versions of
+   the Work obtained from this repository are subject to these terms.
+
+8. Warranty Disclaimer  
+   The Work is provided “as is”, without warranty of any kind, express or
+   implied. In no event shall the author be liable for any claim,
+   damages, or other liability arising from the use of the Work.
+
+By using, modifying, or creating derivative works of the Work, you agree
+to be bound by all terms of this license.

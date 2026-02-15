@@ -3,6 +3,8 @@ import requests
 from pathlib import Path
 import sys
 import subprocess
+from urllib.parse import urlparse
+import time
 
 GITHUB_API = "https://api.github.com/repos/LukieD4/ModGnizer/releases/latest"
 
@@ -16,7 +18,6 @@ def clean_markdown(text: str) -> str:
     return "\n".join(cleaned)
 
 def get_local_version(version_file: Path) -> str:
-    # version_file should be absolute path to buildId.version (or your chosen local source)
     if not version_file.exists():
         return "0.0.0"
     return version_file.read_text().strip()
@@ -26,60 +27,47 @@ def get_latest_release():
     resp.raise_for_status()
     data = resp.json()
 
-    tag = data.get("tag_name", "") or ""
-    # defensive: try name if tag_name missing
-    if not tag:
-        tag = data.get("name", "") or ""
+    tag = data.get("tag_name", "") or data.get("name", "") or ""
 
-    # assets may be missing; guard against IndexError
     assets = data.get("assets", [])
     download_url = assets[0]["browser_download_url"] if assets else ""
     changelog = data.get("body", "No release notes provided.")
 
-    return tag, download_url, changelog
+    # Extract asset filename (e.g., ModGnizer-288.exe)
+    asset_name = ""
+    if download_url:
+        asset_name = Path(urlparse(download_url).path).name
 
-_VERSION_PARTS = 3  # compare using 3-part versions (major.minor.patch)
+    return tag, download_url, changelog, asset_name
+
+_VERSION_PARTS = 3
 
 def _normalize_version(v: str):
-    """
-    Return a tuple (major, minor, patch) of ints extracted from string v.
-    Strategy:
-      - Find first match of digits or digits.digits.digits: r'(\d+(?:\.\d+)*)'
-      - If found parse that into ints.
-      - If not, fall back to last single integer found anywhere.
-      - If nothing found -> (0,0,0)
-    """
     if not v:
-        return (0,) * _VERSION_PARTS
+        return (0, 0, 0)
 
     s = str(v).strip()
-    # first try to find a dotted numeric substring like "1.2.3" or "15" or "1.2"
-    m = re.search(r'(\d+(?:\.\d+)*)', s)
+
+    m = re.search(r"(\d+(?:\.\d+)*)", s)
     if m:
         nums = [int(x) for x in m.group(1).split(".")]
     else:
-        # find any integer anywhere and use the last one (helps "release-15" -> 15)
-        digs = re.findall(r'(\d+)', s)
-        if digs:
-            nums = [int(digs[-1])]
-        else:
-            nums = [0]
+        digs = re.findall(r"(\d+)", s)
+        nums = [int(digs[-1])] if digs else [0]
 
-    # pad/truncate to desired length
     if len(nums) < _VERSION_PARTS:
-        nums = nums + [0] * (_VERSION_PARTS - len(nums))
+        nums += [0] * (_VERSION_PARTS - len(nums))
     elif len(nums) > _VERSION_PARTS:
         nums = nums[:_VERSION_PARTS]
 
     return tuple(nums)
 
 def is_newer(local: str, remote: str) -> bool:
-    """
-    Compare two version strings (local and remote). Returns True if remote > local.
-    """
     return _normalize_version(remote) > _normalize_version(local)
 
 def download_file(url: str, dest: Path):
+    print(url,dest)
+    input()
     r = requests.get(url, stream=True)
     r.raise_for_status()
     with dest.open("wb") as f:
@@ -90,17 +78,13 @@ def download_file(url: str, dest: Path):
 def check_for_updates(version_file: Path, consent_callback=None):
     try:
         local = get_local_version(version_file)
-        remote_tag, url, changelog = get_latest_release()
-
-        # debug print (optional) — helps see what GitHub actually returned
-        # print(f"[DEBUG] local='{local}', remote_tag='{remote_tag}', url='{url}'")
-
-        if not is_newer(local, remote_tag):
-            return False
+        remote_tag, url, changelog, asset_name = get_latest_release()
 
         print(clean_markdown(changelog))
 
-        if consent_callback and not consent_callback():
+        if is_newer(): return False
+
+        if not consent_callback():
             return False
 
         if not url:
@@ -109,16 +93,31 @@ def check_for_updates(version_file: Path, consent_callback=None):
 
         print("\nDownloading update...")
 
-        exe_path = Path(sys.executable)
-        tmp_new = exe_path.with_suffix(".new.exe")
+        # IMPORTANT: use the ORIGINAL EXE, not the temp one
+        exe_path = Path(sys.argv[0]).resolve()
+
+        # New EXE name from GitHub asset
+        new_exe_path = exe_path.with_name(asset_name)
+        tmp_new = new_exe_path.with_suffix(".exe")
 
         download_file(url, tmp_new)
 
-        # On Windows, move new file into place after a short delay
-        subprocess.Popen([
-            "cmd", "/c",
-            f"timeout 2 && move /Y \"{tmp_new}\" \"{exe_path}\""
-        ], shell=False)
+        updater_bat = exe_path.with_suffix(".update.bat")
+
+        updater_bat.write_text(
+            "@echo off\n"
+            "timeout /t 2 /nobreak >nul\n"
+            f'move /Y "{tmp_new}" "{new_exe_path}"\n'
+            f'del \"{exe_path}\" >nul 2>&1\n'
+            f'start \"\" \"{new_exe_path}\"\n'
+            "del \"%~f0\"\n",
+            encoding="utf-8"
+        )
+
+        subprocess.Popen(
+            ["cmd", "/c", str(updater_bat)],
+            creationflags=subprocess.CREATE_NO_WINDOW
+        )
 
         sys.exit(0)
 
