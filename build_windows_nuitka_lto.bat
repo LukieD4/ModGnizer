@@ -4,7 +4,7 @@ setlocal enabledelayedexpansion
 REM ==================================================
 REM PROJECT CONFIG
 REM ==================================================
-set PROJECT_NAME=ModGnizer
+set PROJECT_NAME=Gnizer
 set ENTRY_POINT=py_main.py
 set ICON_PATH=program.ico
 set SRCDIR=%~dp0

@@ -33,6 +33,33 @@ class UnDBJ:
 
         print(f"Unsupported profile source: {self.source_path}")
         return []
+    
+    def get_internal_worlds(self):
+        worlds = []
+
+        try:
+            base = Path(self.source_path / "saves")
+            if not base.exists() or not base.is_dir():
+                return worlds
+
+            # Each instance is typically a directory under the Instances folder
+            for inst in sorted(base.iterdir()):
+                try:
+                    if not inst.is_dir():
+                        continue
+
+                    worlds.append({
+                            "path": inst,
+                            "name": inst.name,
+                            "last_played": int(inst.stat().st_mtime) if inst.exists() else None,
+                        })
+                except:
+                    pass
+            return self._format_worlds(worlds)
+        
+        except Exception as e:
+            pass
+
 
     # -------------------------
     # MODRINTH (SQLite)
@@ -51,6 +78,11 @@ class UnDBJ:
             conn.close()
 
             for internal_name, name, game_version, mod_loader, last_played in rows:
+                
+                # Check if the directory actually exists (Modrinth doesn't properly synchronise records)
+                path = Path(os.environ["APPDATA"]) / "ModrinthApp" / "profiles" / internal_name
+                if not os.path.exists(path): continue
+
                 profiles.append({
                     "path": Path(os.environ["APPDATA"]) / "ModrinthApp" / "profiles" / internal_name,
                     "folder": internal_name,
@@ -255,3 +287,26 @@ class UnDBJ:
             )
 
         return profiles
+    
+
+    def _format_worlds(self, worlds):
+        # Convert timestamps
+        for w in worlds:
+            if w["last_played"]:
+                dt = datetime.fromtimestamp(w["last_played"])
+                w["last_played"] = dt.strftime("%d %B %Y")
+            else:
+                w["last_played"] = "never"
+
+        # Padding
+        max_name = max(len(w["name"]) for w in worlds)
+
+        # Build display
+        for w in worlds:
+            w["display"] = (
+                f"{w['name']:<{max_name}}   "
+                f"Last Played: {w['last_played']}"
+            )
+
+        return worlds
+

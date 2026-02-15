@@ -24,16 +24,16 @@ class ArchiveBundler:
         temp_root = Path(os.environ.get("TEMP", Path.home() / "AppData/Local/Temp"))
         base = archive_path.stem
         ts = datetime.now().strftime("%Y%m%d%H%M%S")
-        out_dir = temp_root / "ModGnizer" / "extracted_reassembled" / f"{base}_{ts}"
+        out_dir = temp_root / "Gnizer" / "extracted_reassembled" / f"{base}_{ts}"
 
         if out_dir.exists():
             shutil.rmtree(out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        ext = archive_path.suffix.lower()
+        ext = archive_path.name.lower()
 
         # ZIP → Python built‑in
-        if ext == ".zip":
+        if "zip" in ext:
             with zipfile.ZipFile(archive_path, "r") as zf:
                 if password:
                     zf.extractall(out_dir, pwd=password.encode())
@@ -45,7 +45,7 @@ class ArchiveBundler:
         sevenz = Path(r"C:\Program Files\7-Zip\7z.exe")
         winrar = Path(r"C:\Program Files\WinRAR\WinRAR.exe")
 
-        if ext == ".7z":
+        if "7z" in ext:
 
             if not sevenz.exists(): raise FileNotFoundError("7z.exe not found at expected path.")
             
@@ -56,7 +56,7 @@ class ArchiveBundler:
             return out_dir
 
 
-        if ext == ".rar":
+        if "rar" in ext:
             
             if not winrar.exists(): raise FileNotFoundError("WinRAR.exe not found at expected path.")
             
@@ -77,14 +77,21 @@ class ArchiveBundler:
 
         source = str(self.source_folder / "*")
 
-        cmd = [str(self.sevenz_path), "a", str(output_file), source]
+        cmd = [
+            str(self.sevenz_path),
+            "a",
+            "-r",
+            str(output_file),
+            source
+        ]
 
         if password:
             cmd.insert(2, f"-p{password}")
-            cmd.insert(3, "-mhe=on")  # encrypt file list
+            cmd.insert(3, "-mhe=on")
 
         subprocess.run(cmd, check=True)
         return output_file
+
 
     
 
@@ -97,16 +104,19 @@ class ArchiveBundler:
         cmd = [
             str(self.winrar_path),
             "a",
-            "-ep1",  # flatten paths
+            "-r",      # recurse into subdirectories
+            "-ep1",    # strip base path (prevents absolute paths)
             str(output_file),
             source
         ]
 
         if password:
-            cmd.insert(3, f"-hp{password}")  # full encryption (file list too)
+            cmd.insert(3, f"-hp{password}")  # full encryption + hide file list
 
         subprocess.run(cmd, check=True)
         return output_file
+
+
 
 
 
@@ -120,3 +130,4 @@ class ArchiveBundler:
                     arcname = full_path.relative_to(self.source_folder)
                     zipf.write(full_path, arcname)
         return output_file
+

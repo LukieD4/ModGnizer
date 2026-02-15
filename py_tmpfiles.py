@@ -19,7 +19,7 @@ class TmpFilesClient:
         self.session = requests.Session()
         self.session.headers.setdefault(
             "User-Agent",
-            "ModGnizer/1.0 (+https://tmpfiles.org)"
+            "Gnizer/1.0 (+https://tmpfiles.org)"
         )
 
     # -------------------------
@@ -28,7 +28,7 @@ class TmpFilesClient:
     def _split_file_to_parts(self, file_path: Path, chunk_size: int) -> List[Path]:
         """
         Split file into zip-branded chunks written into:
-        %TEMP%/ModGnizer/uploads/
+        %TEMP%/Gnizer/uploads/
 
         Part names: <original_filename>0.zip, <original_filename>1.zip, ...
 
@@ -38,9 +38,9 @@ class TmpFilesClient:
         if not file_path.exists() or not file_path.is_file():
             raise TmpFilesError(f"File not found: {file_path}")
 
-        # Resolve ModGnizer temp uploads dir
+        # Resolve Gnizer temp uploads dir
         temp_root = Path(os.environ.get("TEMP", Path.home() / "AppData/Local/Temp"))
-        uploads_dir = temp_root / "ModGnizer" / "uploads"
+        uploads_dir = temp_root / "Gnizer" / "uploads"
         uploads_dir.mkdir(parents=True, exist_ok=True)
 
         parts: List[Path] = []
@@ -82,10 +82,26 @@ class TmpFilesClient:
             raise TmpFilesError("Splitting resulted in no parts.")
 
         return parts
-    
+
     # -------------------------
     # UPLOAD
     # -------------------------
+    def _masked_upload_filename(self, file_path: Path) -> str:
+        """
+        Return a filename to present to the server that preserves the original
+        filename and extension but forces a .zip suffix so the site accepts it.
+
+        If the file already ends with .zip (e.g., chunked part), do NOT append
+        another .zip.
+        """
+        base_name = Path(file_path).name
+
+        # Avoid double-masking chunked parts
+        if base_name.lower().endswith(".zip"):
+            return base_name
+
+        return f"{base_name}.zip"
+
 
     def upload(self, file_path: Path) -> Dict[str, Any]:
         file_path = Path(file_path)
@@ -93,11 +109,14 @@ class TmpFilesClient:
         if not file_path.exists() or not file_path.is_file():
             raise TmpFilesError(f"File not found: {file_path}")
 
+        masked_name = self._masked_upload_filename(file_path)
+
         try:
             with file_path.open("rb") as f:
+                # Send the masked filename in the multipart form so the server sees .zip
                 resp = self.session.post(
                     self.UPLOAD_URL,
-                    files={"file": (file_path.name, f)},
+                    files={"file": (masked_name, f)},
                     timeout=self.timeout,
                 )
         except requests.RequestException as e:
@@ -168,7 +187,7 @@ class TmpFilesClient:
         file_size = file_path.stat().st_size
         if file_size <= chunk_size:
             # small enough for single upload
-            single_resp = self.upload(file_path)  # existing method
+            single_resp = self.upload(file_path)  # existing method (now masked)
             return {
                 "links": [single_resp["link"]],
                 "parts": [file_path],
@@ -257,7 +276,7 @@ class TmpFilesClient:
         # If only one part and we have an internal name, rename to preserve original filename
         internal_name = manifest.get("internal_name")
         temp_root = Path(os.environ.get("TEMP", Path.home() / "AppData/Local/Temp"))
-        download_dir = temp_root / "ModGnizer" / "downloaded_from_tmpfiles_org"
+        download_dir = temp_root / "Gnizer" / "downloaded_from_tmpfiles_org"
 
         if len(downloaded_parts) == 1:
             single = downloaded_parts[0]
@@ -320,7 +339,7 @@ class TmpFilesClient:
 
     def download(self, url: str) -> Path:
         """
-        Downloads a tmpfiles.org file into %TEMP%\\ModGnizer\\
+        Downloads a tmpfiles.org file into %TEMP%\\Gnizer\\
         Accepts either share URL or /dl/ direct URL.
 
         Returns:
@@ -329,14 +348,18 @@ class TmpFilesClient:
         direct_url = self._ensure_direct_url(url)
 
         temp_root = Path(os.environ.get("TEMP", Path.home() / "AppData/Local/Temp"))
-        download_dir = temp_root / "ModGnizer" / "downloaded_from_tmpfiles_org"
+        download_dir = temp_root / "Gnizer" / "downloaded_from_tmpfiles_org"
         download_dir.mkdir(parents=True, exist_ok=True)
 
         filename = Path(urlparse(direct_url).path).name
         if not filename:
             raise TmpFilesError("Could not determine filename from URL.")
 
-        target_path = download_dir / filename
+        # NEW: unmask the filename if needed
+        final_name = self._unmask_filename(filename)
+
+        target_path = download_dir / final_name
+
 
         try:
             with self.session.get(
@@ -367,7 +390,7 @@ class TmpFilesClient:
     # HELPERS
     # -------------------------
 
-    def parse_modgnizer_manifest(raw_text: str) -> dict:
+    def parse_gnizer_manifest(raw_text: str) -> dict:
         """
         Parse a MODGNIZER markdown block or free text and return:
             {
@@ -376,15 +399,24 @@ class TmpFilesClient:
                 "timestamp": Optional[str],
                 "links": List[str]      # ordered list of tmpfiles.org URLs
             }
-        Raises ModGnizerManifestError on malformed content.
+        Raises GnizerManifestError on malformed content.
         """
         if not raw_text or not raw_text.strip():
             raise ValueError("Manifest text is empty.")
 
         text = raw_text.strip()
 
-        # Detect a MODGNIZER block (loose detection is fine)
-        is_modgnizer = "# MODGNIZER" in text or "MODGNIZER" in text.splitlines()[0] if text else False
+        # Detect a GNIZER block (loose detection is fine)
+        split_text = text.splitlines()
+        header_split_text = text.splitlines()[0].lower()
+        shareType_split_text = text.splitlines()[2].lower()
+        is_modlist = "modlist" in shareType_split_text
+        is_savefile = "savefile" in shareType_split_text
+        is_modgnizer = "gnizer" in header_split_text
+
+        if not is_modlist and not is_savefile:
+            raise ValueError("Manifest doesn't know how to handle this. Did you highlight and copy everything?")
+
 
         # Extract tmpfiles.org urls (preserve order)
         urls = re.findall(r"https?://(?:www\.)?tmpfiles\.org/[^\s`]+", text, flags=re.IGNORECASE)
@@ -412,13 +444,35 @@ class TmpFilesClient:
                 "size_bytes": size_bytes,
                 "timestamp": timestamp,
                 "links": urls,
+                "is_modlist": is_modlist,
+                "is_savefile": is_savefile, 
             }
 
         # Not an explicit MODGNIZER block — fallback to plain links
         if urls:
-            return {"internal_name": None, "size_bytes": None, "timestamp": None, "links": urls}
+            raise Exception("Something went wrong in digesting the manifest")
 
         raise ValueError("Text does not contain MODGNIZER data or tmpfiles.org links.")
+    
+    def _unmask_filename(self, filename: str) -> str:
+        """
+        If the uploaded file was masked (e.g., mods.7z.zip), remove the final .zip
+        so the user receives the original filename (mods.7z).
+
+        Rules:
+            - If filename ends with .zip but contains another extension before it,
+            strip only the final .zip.
+            - If the file is a real .zip (e.g., archive.zip), keep it unchanged.
+        """
+        lower = filename.lower()
+        if lower.endswith(".zip"):
+            # Remove only the last .zip
+            base = filename[:-4]
+            # If base still has an extension, we assume masking was used
+            if "." in base:
+                return base
+        return filename
+
 
     def _ensure_direct_url(self, url: str) -> str:
         """

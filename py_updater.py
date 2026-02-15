@@ -33,7 +33,7 @@ def get_latest_release():
     download_url = assets[0]["browser_download_url"] if assets else ""
     changelog = data.get("body", "No release notes provided.")
 
-    # Extract asset filename (e.g., ModGnizer-288.exe)
+    # Extract asset filename (e.g., Gnizer-288.exe)
     asset_name = ""
     if download_url:
         asset_name = Path(urlparse(download_url).path).name
@@ -67,7 +67,6 @@ def is_newer(local: str, remote: str) -> bool:
 
 def download_file(url: str, dest: Path):
     print(url,dest)
-    input()
     r = requests.get(url, stream=True)
     r.raise_for_status()
     with dest.open("wb") as f:
@@ -82,7 +81,7 @@ def check_for_updates(version_file: Path, consent_callback=None):
 
         print(clean_markdown(changelog))
 
-        if is_newer(): return False
+        if is_newer(local, remote_tag): return False
 
         if not consent_callback():
             return False
@@ -95,6 +94,13 @@ def check_for_updates(version_file: Path, consent_callback=None):
 
         # IMPORTANT: use the ORIGINAL EXE, not the temp one
         exe_path = Path(sys.argv[0]).resolve()
+
+        # If running from a .py file, pretend the exe exists for testing
+        if exe_path.suffix == ".py":
+            print("Running in test mode: simulating .exe path")
+            exe_path = exe_path.with_suffix(".exe")
+
+
 
         # New EXE name from GitHub asset
         new_exe_path = exe_path.with_name(asset_name)
@@ -119,7 +125,11 @@ def check_for_updates(version_file: Path, consent_callback=None):
             creationflags=subprocess.CREATE_NO_WINDOW
         )
 
-        sys.exit(0)
+        print("\n\nYou can now close this app, it has now been updated :3")
+        time.sleep(2)
+
+        return True
+
 
     except Exception as e:
         print(f"Update check failed: {e}")

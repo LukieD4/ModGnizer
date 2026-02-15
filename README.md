@@ -1,2 +1,2 @@
-# ModGnizer
+# Gnizer
 A Minecraft Mod Organizer 

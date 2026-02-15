@@ -3,7 +3,7 @@ from PyQt5.QtWidgets import QApplication, QFileDialog
 from py_archive import ArchiveBundler
 from py_undbj import UnDBJ
 from py_tmpfiles import TmpFilesClient, TmpFilesError
-from py_report import review_and_install
+from py_report import review_and_install_mods, install_world
 from py_updater import check_for_updates
 import winreg, send2trash, shutil
 
@@ -17,8 +17,8 @@ init(autoreset=True)
 class App:
     
     VERSION_FILE = "buildId.version"
-    MENU_TITLE = "Main Menu"
-    DIVIDER = "-- -x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x- --"
+    MENU_TITLE = "\n-x-x- { Main Menu } -x-x-\n"
+    DIVIDER = "-- -x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x- --"
 
     # Registry paths for mod managers
     REGISTRY_MAP = {
@@ -34,7 +34,7 @@ class App:
             "profiles": Path(r"%APPDATA%\ModrinthApp\profiles")
         },
         "CurseForge (Overwolf)": {
-            "db": Path(r"%USERPROFILE%\curseforge\minecraft\Instances\\"),
+            "db": Path(r"%USERPROFILE%\curseforge\minecraft\Instances\\"), 
             "profiles": Path(r"%USERPROFILE%\curseforge\minecraft\Instances")
         },
         "CurseForge": {
@@ -66,6 +66,7 @@ class App:
     def __init__(self):
         self.debug = False
         self.log = None
+        self._cls_skip = 2
         
         # Check for updates and ask user consent
         user_accepted_update = check_for_updates(
@@ -81,12 +82,13 @@ class App:
 
     def refresh_main_menu(self):
         """Refresh the main menu with updated temp cache size"""
-        _, temp_bytes = self.get_modgnizer_temp_info()
+        _, temp_bytes = self.get_gnizer_temp_info()
         self.menu_main_definition = {
-            "1": ("Load *MODS* from an ARCHIVE (or link)",                  "menu_load_mods_from_archive"),
+            "1": ("Load *DATA* from an ARCHIVE (or link)",                  "menu_load_data_from_archive"),
             "2": ("Bundle *MODS* to an ARCHIVE",                            "menu_bundle_mods_to_archive"),
-            "3": (f"Clear temp cache ({self.format_bytes(temp_bytes)})",    "menu_clear_temp_cache"),
-            "4": ("Log errors",                                             "menu_toggle_error_logging"),
+            "3": ("Bundle *WORLD* to an ARCHIVE",                           "menu_bundle_world_to_archive"),
+            "4": (f"Clear temp cache ({self.format_bytes(temp_bytes)})",    "menu_clear_temp_cache"),
+            "5": ("Log errors",                                             "menu_toggle_error_logging"),
             "#": ("Quit",                                                   "menu_quit"),
         }
         self.menu_modes = {
@@ -107,7 +109,7 @@ class App:
             filemode="w"
         )
 
-        self.log = logging.getLogger(f"ModGnizer {self.build_id}")
+        self.log = logging.getLogger(f"Gnizer {self.build_id}")
 
         self._log("Started", "info")
 
@@ -136,8 +138,11 @@ class App:
     # region CLEAR SCREEN
     # -------------------------
     def cls(self):
-        if not self.debug:
+        if self._cls_skip > 0:
+            self._cls_skip -= 1
+        elif not self.debug:
             os.system("cls")
+        
 
     # -------------------------
     # region VERSION HANDLING
@@ -171,7 +176,7 @@ class App:
     def menu_clear_temp_cache(self):
         self._log("IN -> menu_clear_temp_cache","info")
 
-        temp_path, temp_bytes = self.get_modgnizer_temp_info()
+        temp_path, temp_bytes = self.get_gnizer_temp_info()
         
         if temp_bytes == 0:
             self.operation_text = "Temp cache is empty."
@@ -182,16 +187,90 @@ class App:
         if not self.get_consent("Are you sure you want to clear the temp cache"):
             return True
 
-        if self.clear_modgnizer_temp():
+        if self.clear_Gnizer_temp():
             print(Fore.GREEN + "Temp cache cleared.")
             self.refresh_main_menu()
         else:
             print(Fore.RED + "Failed to clear temp cache.")
         
         return True
+    
 
-    def menu_load_mods_from_archive(self):
-        self._log("IN -> menu_load_mods_from_archive","info")
+    def menu_bundle_world_to_archive(self):
+        self._log("IN -> menu_bundle_world_to_archive", "info")
+
+        # Get mod manager and profile
+        chosen_mod_manager = self.get_mod_managers()
+        if not chosen_mod_manager:
+            return True
+        
+        chosen_profile = self.get_mod_profiles(chosen_mod_manager)
+        if not chosen_profile:
+            return True
+
+        profile_path = chosen_mod_manager["profiles_path"] / chosen_profile["folder"]
+        print(f"\n{Fore.WHITE}Selected Profile: {chosen_profile['name']}")
+        
+        chosen_world = self.get_worlds_of_mod_profile(profile_path)
+        if not chosen_world:
+            return True
+        print(f"{Fore.WHITE}World Directory: {chosen_world["path"]}")
+
+        # Get archive preferences
+        archive_prefs = self.get_archive_preferences()
+        if not archive_prefs:
+            return True
+
+        # Create output directory
+        temp_root = Path(os.environ.get("TEMP", Path.home() / "AppData/Local/Temp"))
+        bundled_dir = temp_root / "Gnizer" / "world_bundled"
+        bundled_dir.mkdir(parents=True, exist_ok=True)
+        
+        output_path = bundled_dir / f"{chosen_world['name']}.{archive_prefs['format']}"
+        
+        if not self.get_consent_delete_file(output_path):
+            return True
+
+        # Bundle the archive
+        bundler = ArchiveBundler(chosen_world["path"])
+        format_handlers = {
+            "zip": lambda: bundler.bundle_zip(output_path),
+            "7z": lambda: bundler.bundle_7z(output_path, archive_prefs["password"]),
+            "rar": lambda: bundler.bundle_rar(output_path, archive_prefs["password"]),
+        }
+        
+        try:
+            format_handlers[archive_prefs["format"]]()
+        except FileNotFoundError as e:
+            self._log(e,"critical")
+            self.operation_text = Fore.RED + f"Required tool not found: {e}"
+            return True
+        except Exception as e:
+            self._log(e,"critical")
+            # Keep original behavior but avoid crashing on unexpected string formatting
+            try:
+                err_arg = e.args[0]
+            except Exception:
+                err_arg = str(e)
+            if isinstance(err_arg, str) and "10" in err_arg:
+                self.operation_text = Fore.RED + f"Error: World '{chosen_world['name']}' contains no data to bundle."
+            else:
+                self.operation_text = Fore.RED + f"Unexpected error: {e}"
+            return True
+
+        print(Fore.BLUE + f"Archive created on Desktop: {output_path}")
+        
+        # Ask about upload
+        try:
+            self.get_consent_upload_to_fileio(output_path, "savefile")
+        except Exception as e:
+            self._log(e,"critical")
+            self.operation_text = Fore.RED + f"Upload step failed: {e}"
+        
+        return True
+
+    def menu_load_data_from_archive(self):
+        self._log("IN -> menu_load_data_from_archive","info")
 
         source = self.get_archive_source()
         if not source:
@@ -202,7 +281,7 @@ class App:
 
         if kind == "clipboard":
             try:
-                manifest = TmpFilesClient.parse_modgnizer_manifest(value)
+                manifest = TmpFilesClient.parse_gnizer_manifest(value)
             except Exception as e:
                 self._log(e,"critical")
                 self.operation_text = Fore.RED + str(e)
@@ -221,7 +300,9 @@ class App:
                 archive_path = downloaded[0]
             except Exception as e:
                 self._log(e,"critical")
-                self.operation_text = Fore.RED + f"Download failed: {e}"
+                http404_code = "HTTP 404" in e.args[0]
+
+                self.operation_text = Fore.RED + f"Download has expired, tell your friend to rebundle again!" if http404_code else Fore.RED + f"Download failed: {e}"
                 return True
         
         elif kind == "local":
@@ -259,29 +340,61 @@ class App:
         chosen_mod_profile = self.get_mod_profiles(chosen_mod_manager)
         if not chosen_mod_profile:
             return True
-
-        # Check if archive name matches profile
-        archive_name = archive_path.name
-        profile_folder_with_ext = f"{chosen_mod_profile['folder']}{archive_path.suffix}"
-        if archive_name != profile_folder_with_ext:
-            msg = Fore.YELLOW + f"`{archive_name}` doesn't match `{profile_folder_with_ext}`, proceed anyway"
-            if not self.get_consent(msg):
-                return True
-
-        # Review and install
-        print(self.DIVIDER)
-        try:
-            review_and_install(
-                extracted_path,
-                chosen_mod_manager,
-                chosen_mod_profile,
-                self.get_consent,
-                lambda text: setattr(self, "operation_text", text)
-            )
-        except Exception as e:
-            self._log(e,"critical")
-            self.operation_text = Fore.RED + f"Review/install step failed: {e}"
         
+
+        # HANDLE: SAVEFILE   /    MODLIST
+        if manifest["is_savefile"]:
+
+            chosen_world = self.get_worlds_of_mod_profile(chosen_mod_profile["path"])
+            if not chosen_world:
+                return True
+            print(f"{Fore.WHITE}World Directory: {chosen_world["path"]}")
+
+            # Review world name
+            if chosen_world["name"] != archive_path.stem:
+                msg = Fore.YELLOW + f"`{archive_name}` doesn't match `{profile_folder_with_ext}`, proceed anyway"
+                if not self.get_consent(msg):
+                    return True
+            
+            # Review and install
+            print("\n" + self.DIVIDER)
+            try:
+                install_world(
+                    extracted_path,
+                    chosen_world,
+                    self.get_consent,
+                    lambda text: setattr(self, "operation_text", text)
+                )
+            except Exception as e:
+                self._log(e,"critical")
+                self.operation_text = Fore.RED + f"Review/install step failed: {e}"
+
+        
+        elif manifest["is_modlist"]:
+
+            # Check if archive name matches profile
+            archive_name = archive_path.name
+            archive_stem = archive_path.stem
+            profile_folder_with_ext = f"{chosen_mod_profile['folder']}{archive_path.suffix}"
+            if archive_name != profile_folder_with_ext:
+                msg = Fore.YELLOW + f"`{archive_name}` doesn't match `{profile_folder_with_ext}`, proceed anyway"
+                if not self.get_consent(msg):
+                    return True
+
+            # Review and install
+            print("\n" + self.DIVIDER)
+            try:
+                review_and_install_mods(
+                    extracted_path,
+                    chosen_mod_manager,
+                    chosen_mod_profile,
+                    self.get_consent,
+                    lambda text: setattr(self, "operation_text", text)
+                )
+            except Exception as e:
+                self._log(e,"critical")
+                self.operation_text = Fore.RED + f"Review/install step failed: {e}"
+            
         return True
 
     def menu_bundle_mods_to_archive(self):
@@ -307,7 +420,7 @@ class App:
 
         # Create output directory
         temp_root = Path(os.environ.get("TEMP", Path.home() / "AppData/Local/Temp"))
-        bundled_dir = temp_root / "ModGnizer" / "bundled"
+        bundled_dir = temp_root / "Gnizer" / "bundled"
         bundled_dir.mkdir(parents=True, exist_ok=True)
         
         output_path = bundled_dir / f"{chosen_profile['folder']}.{archive_prefs['format']}"
@@ -331,14 +444,22 @@ class App:
             return True
         except Exception as e:
             self._log(e,"critical")
-            self.operation_text = Fore.RED + f"Unexpected error: {e}" if not "10" in str(e.args[0]) else Fore.RED + f"Error: Mod Profile '{chosen_profile["name"]}' contains no mods to bundle."
+            # Keep original behavior but avoid crashing on unexpected string formatting
+            try:
+                err_arg = e.args[0]
+            except Exception:
+                err_arg = str(e)
+            if err_arg == 10:
+                self.operation_text = Fore.RED + f"Error: Mod Profile '{chosen_profile['name']}' contains no mods to bundle."
+            else:
+                self.operation_text = Fore.RED + f"Unexpected error: {e}"
             return True
 
-        print(Fore.BLUE + f"Archive created on Desktop: {output_path}")
+        print(Fore.BLUE + f"Archive created at: {output_path}")
         
         # Ask about upload
         try:
-            self.get_consent_upload_to_fileio(output_path)
+            self.get_consent_upload_to_fileio(output_path, "modlist")
         except Exception as e:
             self._log(e,"critical")
             self.operation_text = Fore.RED + f"Upload step failed: {e}"
@@ -356,7 +477,7 @@ class App:
     def get_mod_managers(self):
         self._log("GET -> get_mod_managers", "info")
 
-        print(Style.BRIGHT + "\n**Select your Mod Manager:**\n")
+        print(Style.BRIGHT + "\n-x-x- { Select a **MOD MANAGER** } -x-x-\n")
         
         managers = self.detect_mod_managers()
         manager_list = list(managers.items())
@@ -369,7 +490,8 @@ class App:
         for i, (name, _) in enumerate(manager_list, 1):
             print(Fore.LIGHTBLACK_EX + f"{i}. {name}")
         
-        choice = self._get_numeric_input(len(manager_list))
+        # Use the improved numeric input which loops until valid or cancelled
+        choice = self.query_numeric_input(len(manager_list))
         return None if choice is None else manager_list[choice - 1][1]
 
     def get_mod_profiles(self, chosen_mod_manager):
@@ -382,15 +504,35 @@ class App:
             self.operation_text = Fore.RED + "No profiles were detected in this mod manager."
             return None
         
-        print(self.DIVIDER)
+        print("\n" + self.DIVIDER)
         
         for i, p in enumerate(profiles, 1):
-            print(Fore.LIGHTBLACK_EX + f"{i}. {p['display']}")
+            print(Fore.LIGHTBLACK_EX + f"[{i}]. {p['display']}")
         
-        print(Style.BRIGHT + "\n**Select a Profile**")
+        print(Style.BRIGHT + "\n-x-x- { Select a **MOD PROFILE** } -x-x-\n")
         
-        choice = self._get_numeric_input(len(profiles))
+        choice = self.query_numeric_input(len(profiles))
         return None if choice is None else profiles[choice - 1]
+    
+    def get_worlds_of_mod_profile(self, profile_path):
+        self._log("GET -> get_worlds_of_mod_profile", "info")
+
+        undb = UnDBJ(profile_path)
+        worlds = undb.get_internal_worlds()
+        
+        if not worlds:
+            self.operation_text = Fore.RED + "No worlds were detected in this mod profile."
+            return None
+        
+        print("\n" + self.DIVIDER)
+        
+        for i, p in enumerate(worlds, 1):
+            print(Fore.LIGHTBLACK_EX + f"[{i}]. {p["display"]}")
+        
+        print(Style.BRIGHT + "\n-x-x- { Select a **WORLD** } -x-x-\n")
+        
+        choice = self.query_numeric_input(len(worlds))
+        return None if choice is None else worlds[choice - 1]
 
     def get_archive_preferences(self):
         self._log("GET -> get_archive_preferences", "info")
@@ -398,95 +540,120 @@ class App:
         bundler = ArchiveBundler(Path("."))
         available = {"1": "zip"}
         
-        print(Style.BRIGHT + "\n**Choose archive format:**")
-        print(Fore.LIGHTBLACK_EX + "1. ZIP")
-        
-        if bundler.has_7z():
-            print(Fore.LIGHTBLACK_EX + "2. 7Z (password supported)")
-            available["2"] = "7z"
-        
-        if bundler.has_winrar():
-            print(Fore.LIGHTBLACK_EX + "3. RAR (password supported) + recommended")
-            available["3"] = "rar"
-        
-        choice = input(Fore.WHITE + "> ").strip()
-        if choice not in available:
-            self.operation_text = Fore.RED + "Invalid number for archive selection."
-            return None
-        
-        fmt = available[choice]
-        
-        if fmt == "zip":
-            print(Fore.WHITE + "Zipping...")
-            return {"format": "zip", "password": None}
-        
-        password = input("\n" + Fore.YELLOW + "Enter a password for the archive (required): ").strip()
-        if not password:
-            self.operation_text = Fore.RED + "Password is required."
-            return None
-        
-        return {"format": fmt, "password": password}
+        # Loop until user provides a valid selection or cancels
+        while True:
+            print(Style.BRIGHT + "\n-x-x- { Choose **ARCHIVE** Format } -x-x-\n")
+            print(Fore.LIGHTBLACK_EX + "[1]. ZIP")
+            
+            if bundler.has_7z():
+                print(Fore.LIGHTBLACK_EX + "[2]. 7Z (password supported)")
+                available["2"] = "7z"
+            
+            if bundler.has_winrar():
+                print(Fore.LIGHTBLACK_EX + "[3]. RAR (password supported) + recommended")
+                available["3"] = "rar"
+            
+            choice = input(Fore.WHITE + "> ").strip()
+            if choice.lower() in ("c", "q"):
+                self.operation_text = Fore.RED + "Cancelled."
+                return None
+
+            if choice not in available:
+                print(Fore.RED + "Invalid number for archive selection. Enter a valid number or 'c' to cancel.")
+                continue
+            
+            fmt = available[choice]
+            
+            if fmt == "zip":
+                print(Fore.WHITE + "Zipping...")
+                return {"format": "zip", "password": None}
+            
+            # For 7z/rar require password
+            while True:
+                password = input("\n" + Fore.YELLOW + "Enter a password for the archive (required, or 'c' to cancel): ").strip()
+                if password.lower() in ("c", "q"):
+                    self.operation_text = Fore.RED + "Cancelled."
+                    return None
+                if not password:
+                    print(Fore.RED + "Password is required for this format. Enter a password or 'c' to cancel.")
+                    continue
+                return {"format": fmt, "password": password}
 
     def get_archive_source(self):
         self._log("GET -> get_archive_source", "info")
 
-        print(Style.BRIGHT + "\n**Load MODS from:**\n")
-        print(Fore.LIGHTBLACK_EX + "1. Read from clipboard (MODGNIZER shared text)")
-        print(Fore.LIGHTBLACK_EX + "2. Local archive file")
-        
-        choice = input(Fore.WHITE + "> ").strip()
-        
-        if choice == "1":
-            print(Fore.CYAN + "\nPress ENTER to read MODGNIZER data from your clipboard.\n" +
-                  Fore.LIGHTBLACK_EX + "(Make sure you copied the entire shared block)")
-            input()
+        # Loop until user provides a valid selection or cancels
+        while True:
+            print(Style.BRIGHT + "\n-x-x- { Load *DATA* From? } -x-x-\n")
+            print(Fore.LIGHTBLACK_EX + "[1]. Read from clipboard (Gnizer shared text)")
+            print(Fore.LIGHTBLACK_EX + "[2]. Local archive file")
+            print(Fore.LIGHTBLACK_EX + "\n or 'c' to cancel and return to the previous menu. ^\n")
             
-            text = self.read_from_clipboard()
-            if not text:
-                self.operation_text = Fore.RED + "Clipboard is empty or does not contain text."
+            choice = input(Fore.WHITE + "> ").strip().lower()
+            
+            if choice in ("c", "q"):
+                self.operation_text = Fore.RED + "Cancelled."
                 return None
-            
-            if "# MODGNIZER" not in text or "## Download Links" not in text:
-                self.operation_text = Fore.RED + "Clipboard content is not a valid MODGNIZER share."
-                return None
-            
-            return ("clipboard", text)
-        
-        elif choice == "2":
-            try:
-                app = QApplication.instance() or QApplication(sys.argv)
-                file_path, _ = QFileDialog.getOpenFileName(
-                    None, "Select Mod Archive",
-                    str(Path.home() / "Desktop"),
-                    "Archives (*.zip *.7z *.rar);;All Files (*)"
-                )
+
+            if choice == "1":
+                print(Fore.CYAN + "\nPress ENTER to read Gnizer data from your clipboard.\n" +
+                      Fore.LIGHTBLACK_EX + "(Make sure you copied the entire shared block)")
+                input()
                 
-                if not file_path:
-                    self.operation_text = Fore.RED + "No file selected."
-                    return None
+                text = self.read_from_clipboard()
+                if not text:
+                    self.operation_text = Fore.RED + "Clipboard is empty or does not contain text."
+                    # allow retry instead of returning to main menu
+                    print(Fore.LIGHTBLACK_EX + "Clipboard empty or invalid. Try again or press 'c' to cancel.")
+                    continue
                 
-                return ("local", Path(file_path))
-            except Exception as e:
-                self._log(e,"critical")
-                self.operation_text = Fore.RED + f"Failed to open file dialog: {e}"
-                return None
-        
-        self.operation_text = Fore.RED + "Invalid selection for archive source."
-        return None
+                if "# Gnizer" not in text or "## Download Links" not in text:
+                    self.operation_text = Fore.RED + "Clipboard content is not a valid Gnizer share."
+                    print(Fore.LIGHTBLACK_EX + "Clipboard content invalid. Try again or press 'c' to cancel.")
+                    continue
+                
+                return ("clipboard", text)
+            
+            elif choice == "2":
+                try:
+                    app = QApplication.instance() or QApplication(sys.argv)
+                    file_path, _ = QFileDialog.getOpenFileName(
+                        None, "Select Mod Archive",
+                        str(Path.home() / "Desktop"),
+                        "Archives (*.zip *.7z *.rar);;All Files (*)"
+                    )
+                    
+                    if not file_path:
+                        self.operation_text = Fore.RED + "No file selected."
+                        print(Fore.LIGHTBLACK_EX + "No file selected. Try again or press 'c' to cancel.")
+                        continue
+                    
+                    return ("local", Path(file_path))
+                except Exception as e:
+                    self._log(e,"critical")
+                    self.operation_text = Fore.RED + f"Failed to open file dialog: {e}"
+                    print(Fore.LIGHTBLACK_EX + "File dialog failed. Try again or press 'c' to cancel.")
+                    continue
+            
+            print(Fore.RED + "Invalid selection for archive source. Enter 1, 2, or 'c' to cancel.")
 
     def get_consent(self, message: str):
         self._log("GET (CONSENT) -> get_consent", "info")
 
-        print("\n" + Fore.YELLOW + f"{message}? (y/n)")
-        choice = input(Fore.YELLOW + "> ").strip().lower()
-        
-        if choice in ("y", "yes"):
-            return True
-        elif choice in ("n", "no"):
-            return False
-        
-        self.operation_text = Fore.RED + "Invalid selection."
-        return False
+        # Loop until user provides a valid y/n or cancels
+        while True:
+            print(Fore.YELLOW + f"{message}? (y/n)  (or 'c' to cancel)")
+            choice = input(Fore.YELLOW + "> ").strip().lower()
+            
+            if choice in ("y", "yes"):
+                return True
+            elif choice in ("n", "no"):
+                return False
+            elif choice in ("c", "q"):
+                self.operation_text = Fore.RED + "Cancelled."
+                return False
+            
+            print(Fore.RED + "Invalid selection. Please enter 'y' or 'n', or 'c' to cancel.")
 
     def get_consent_delete_file(self, file_path: Path):
         self._log("GET (CONSENT) -> get_consent_delete_file", "info")
@@ -494,25 +661,34 @@ class App:
         if not file_path.exists():
             return True
         
-        print(Fore.RED + f"\nThe file already exists:\n{file_path}")
-        print(Fore.RED + "Delete it and continue? (y/n)")
-        
-        choice = input(Fore.RED + "> ").strip().lower()
-        if choice not in ("y", "yes"):
-            print(Fore.WHITE + "Cancelled.")
-            return False
-        
-        try:
-            send2trash.send2trash(str(file_path))
-            print(Fore.BLUE + "Existing file moved to Recycle Bin.")
-            return True
-        except Exception as e:
-            self._log(e,"critical")
-            self.operation_text = Fore.RED + f"Failed to delete file: {e}"
-            return False
+        # Loop until user confirms or cancels
+        while True:
+            print(Fore.RED + f"\nThe file already exists:\n{file_path}")
+            print(Fore.RED + "Delete it and continue? (y/n)  (or 'c' to cancel)")
+            
+            choice = input(Fore.RED + "> ").strip().lower()
+            if choice in ("c", "q"):
+                print(Fore.WHITE + "Cancelled.")
+                self.operation_text = Fore.RED + "Cancelled."
+                return False
+            if choice not in ("y", "yes"):
+                print(Fore.WHITE + "Cancelled.")
+                return False
+            
+            try:
+                send2trash.send2trash(str(file_path))
+                print(Fore.BLUE + "Existing file moved to Recycle Bin.")
+                return True
+            except Exception as e:
+                self._log(e,"critical")
+                self.operation_text = Fore.RED + f"Failed to delete file: {e}"
+                return False
 
-    def get_consent_upload_to_fileio(self, archive_path: Path):
+    def get_consent_upload_to_fileio(self, archive_path: Path, type_of_upload: str):
         self._log("GET (CONSENT) -> get_consent_upload_to_fileio", "info")
+
+        if not type_of_upload:
+            self.operation_text = Fore.RED + "(internal error) type_of_upload was not declared, is it a modlist or savefile?"
 
         if not archive_path.exists() or not archive_path.is_file():
             self.operation_text = Fore.RED + "Archive not found for upload."
@@ -537,15 +713,15 @@ class App:
                 raise Exception("Upload completed but no links returned.")
             
             if len(links) == 1:
-                self.save_links_md_and_copy_to_clipboard([links[0]], archive_path)
+                self.save_links_md_and_copy_to_clipboard([links[0]], archive_path, type_of_upload)
                 print(Fore.GREEN + "Upload successful!")
-                print(Fore.WHITE + "A MODGNIZER share block has been copied to your clipboard.")
+                print(Fore.WHITE + "A Gnizer share block has been copied to your clipboard.")
             else:
                 print(Fore.GREEN + "Chunked upload successful!")
                 print(Fore.WHITE + f"Parts uploaded: {len(links)}")
-                self.save_links_md_and_copy_to_clipboard(links, archive_path)
+                self.save_links_md_and_copy_to_clipboard(links, archive_path, type_of_upload)
                 print(Fore.LIGHTBLACK_EX + "\nTip: Send the copied text to your friend.")
-                print(Fore.LIGHTBLACK_EX + "They can paste it directly into ModGnizer.")
+                print(Fore.LIGHTBLACK_EX + "They can paste it directly into Gnizer.")
         except TmpFilesError as e:
             self._log(e,"critical")
             self.operation_text = Fore.RED + "Upload failed:" + Fore.LIGHTBLACK_EX + str(e)
@@ -553,11 +729,11 @@ class App:
             self._log(e,"critical")
             self.operation_text = Fore.RED + f"Unexpected error during upload: {e}"
 
-    def get_modgnizer_temp_info(self):
-        self._log("GET -> get_modgnizer_temp_info", "info")
+    def get_gnizer_temp_info(self):
+        self._log("GET -> get_gnizer_temp_info", "info")
 
         temp_root = Path(os.environ.get("TEMP", Path.home() / "AppData/Local/Temp"))
-        temp_dir = temp_root / "ModGnizer"
+        temp_dir = temp_root / "Gnizer"
         
         if not temp_dir.exists():
             return temp_dir, 0
@@ -574,13 +750,16 @@ class App:
         self.refresh_main_menu()
         self.cls()
 
-        os.system(f"title ModGnizer v{self.build_id}")
+        os.system(f"title Gnizer v{self.build_id}")
 
         print(Fore.WHITE + f" // (Version {self.build_id}) //\nby @LukieD4 on GitHub\n")
         print(Style.BRIGHT + self.MENU_TITLE)
         
         for key, (label, _) in self.menu_modes.items():
-            print(Fore.LIGHTBLACK_EX + f"{key}. {label}")
+            print(Fore.LIGHTBLACK_EX + f"[{key}]. {label}")
+
+        print("\n Enter a valid number from the list above ^")
+        print(Fore.LIGHTBLACK_EX + " or 'c' to cancel current prompt when asked for input. ^\n")
         
         if self.operation_text:
             print(f"\n{Fore.LIGHTBLACK_EX}[INFO: {self.operation_text}]")
@@ -632,39 +811,40 @@ class App:
         
         return {k: v for k, v in mod_managers.items() if v["installed"]}
 
-    def save_links_md_and_copy_to_clipboard(self, links: list[str], original_file: Path):
+    def save_links_md_and_copy_to_clipboard(self, links: list[str], original_file: Path, type_of_upload:str):
         self._log("SAVE -> save_links_md_and_copy_to_clipboard", "info")
 
         if not links:
             return
         
+
         temp_root = Path(os.environ.get("TEMP", Path.home() / "AppData/Local/Temp"))
-        modgnizer_temp = temp_root / "ModGnizer"
-        modgnizer_temp.mkdir(parents=True, exist_ok=True)
+        Gnizer_temp = temp_root / "Gnizer"
+        Gnizer_temp.mkdir(parents=True, exist_ok=True)
         
         internal_name = original_file.name
         size_bytes = original_file.stat().st_size if original_file.exists() else 0
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         short_ts = datetime.now().strftime("%Y%m%d%H%M%S")
         
-        md_content = f"""```# MODGNIZER
+        md_content = f"""```# Gnizer (v{self.build_id})
 
-A friend has shared their modlist with you!
+A friend has shared their {type_of_upload} with you!
 
-*Internal name: "{internal_name}"  
-Size of modlist: {size_bytes} bytes  
-Date of modlist: {timestamp}*
+*Internal name: \"{internal_name}\"  
+Size of {type_of_upload}: {size_bytes} bytes  
+Date of {type_of_upload}: {timestamp}*
 
 **Instructions**
 - Highlight *this entire text*
     - CTRL + C
-- Open ModGnizer
-    - Select: 'Load *MODS* ...'
+- Open Gnizer
+    - Select: 'Load *DATA* from an ARCHIVE'
     - Select: 'Read from clipboard'
     - [DO NOT PASTE]
     - Press Enter
 
-- ModGnizer will automatically do the hard work :3
+- Gnizer will automatically do the hard work :3
 
 {self.DIVIDER}
 
@@ -673,8 +853,8 @@ Date of modlist: {timestamp}*
         md_content += "\n".join(links) + "\n```"
         
         # Save markdown file
-        md_filename = f"MODGNIZER_shared_modlist_{short_ts}.md"
-        md_path = modgnizer_temp / md_filename
+        md_filename = f"Gnizer_shared_modlist_{short_ts}.md"
+        md_path = Gnizer_temp / md_filename
         md_path.write_text(md_content, encoding="utf-8")
         
         # Copy to clipboard
@@ -709,10 +889,10 @@ Date of modlist: {timestamp}*
             self._log(e,"critical")
             print(Fore.RED + f"Failed to open Notepad: {e}")
 
-    def clear_modgnizer_temp(self):
-        self._log("DELETE -> clear_modgnizer_temp", "info")
+    def clear_Gnizer_temp(self):
+        self._log("DELETE -> clear_Gnizer_temp", "info")
         temp_root = Path(os.environ.get("TEMP", Path.home() / "AppData/Local/Temp"))
-        temp_dir = temp_root / "ModGnizer"
+        temp_dir = temp_root / "Gnizer"
         
         if not temp_dir.exists():
             return True
@@ -734,14 +914,63 @@ Date of modlist: {timestamp}*
             size /= 1024
         return f"{size:.1f} TB"
 
+    # -------------------------
+    # DRY INPUT HELPERS
+    # -------------------------
+    def query_input_with_retry(self, prompt: str, validator, *,
+                               cancel_values=("c", "q"),
+                               error_message: str = "Invalid input."):
+        """
+        Generic input prompt that retries until validator returns a non-None value
+        or the user cancels by entering one of cancel_values.
+
+        - prompt: text to show to the user (already includes color codes if desired)
+        - validator: callable(str) -> any | None. Return parsed value on success, None on invalid.
+        - cancel_values: tuple of strings that cancel the prompt
+        - error_message: message to show when validator returns None
+        """
+        self._log("INPUT -> query_input_with_retry", "info")
+        while True:
+            raw = input(prompt).strip()
+            if raw.lower() in cancel_values:
+                self.operation_text = Fore.RED + "Cancelled."
+                return None
+            try:
+                val = validator(raw)
+            except Exception as e:
+                # Validator raised; log and show error, then retry
+                self._log(e, "warning")
+                print(Fore.RED + f"{error_message} ({e})")
+                continue
+            if val is None:
+                print(Fore.RED + error_message)
+                continue
+            return val
+
+    def query_numeric_input(self, max_value: int, *,
+                            prompt: str = None,
+                            cancel_values=("c", "q")):
+        """
+        Query the user for a numeric selection between 1 and max_value inclusive.
+        Returns the integer selection, or None if cancelled.
+        """
+        self._log("INPUT -> query_numeric_input", "info")
+        if prompt is None:
+            prompt = Fore.WHITE + "> "
+        def validator(raw: str):
+            if not raw.isdigit():
+                return None
+            n = int(raw)
+            if not (1 <= n <= max_value):
+                return None
+            return n
+        return self.query_input_with_retry(prompt, validator, cancel_values=cancel_values,
+                                           error_message=f"Enter a number between 1 and {max_value}, or 'c' to cancel.")
+
+    # Backwards-compatible alias for older code that used _get_numeric_input
     def _get_numeric_input(self, max_value: int):
-        """Helper to get numeric input within range"""
-        self._log("INPUT -> _get_numeric_input", "info")
-        choice = input(Fore.WHITE + "> ").strip()
-        if not choice.isdigit() or not (1 <= int(choice) <= max_value):
-            self.operation_text = Fore.RED + "Invalid selection."
-            return None
-        return int(choice)
+        """Helper to get numeric input within range (keeps docstring for compatibility)."""
+        return self.query_numeric_input(max_value)
 
     # -------------------------
     # region RUN
