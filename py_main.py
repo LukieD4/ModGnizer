@@ -70,7 +70,7 @@ class App:
         
         # Check for updates and ask user consent
         user_accepted_update = check_for_updates(
-            self.get_runtime_base() / self.VERSION_FILE,
+            self.get_temp_runtime_base() / self.VERSION_FILE,
             lambda:self.get_consent("\n\n\n\n\nA new version is available. Do you want to update")
         ) if self.is_running_as_exe() else False
         if not user_accepted_update: self.cls()
@@ -184,7 +184,7 @@ class App:
 
         print(Fore.YELLOW + f"\nDelete:\n{temp_path}\nTotal size: {self.format_bytes(temp_bytes)}")
         
-        if not self.get_consent("Are you sure you want to clear the temp cache"):
+        if not self.get_consent("Are you sure you want to clear the temp cache\nTHIS WILL DELETE BACKUPS TOO!!"):
             return True
 
         if self.clear_Gnizer_temp():
@@ -211,7 +211,7 @@ class App:
         profile_path = chosen_mod_manager["profiles_path"] / chosen_profile["folder"]
         print(f"\n{Fore.WHITE}Selected Profile: {chosen_profile['name']}")
         
-        chosen_world = self.get_worlds_of_mod_profile(profile_path)
+        chosen_world = self.get_worlds_of_mod_profile(profile_path, add_world=False)
         if not chosen_world:
             return True
         print(f"{Fore.WHITE}World Directory: {chosen_world["path"]}")
@@ -279,6 +279,7 @@ class App:
         kind, value = source
         archive_path = None
 
+        self._log(f"KIND -> {kind}", "info")
         if kind == "clipboard":
             try:
                 manifest = TmpFilesClient.parse_gnizer_manifest(value)
@@ -343,18 +344,52 @@ class App:
         
 
         # HANDLE: SAVEFILE   /    MODLIST
+        archive_name = archive_path.name
+        archive_stem = archive_path.stem
+        profile_folder_with_ext = f"{chosen_mod_profile['folder']}{archive_path.suffix}"
+        self._log(f"HANDLE -> Savefile?:{manifest["is_savefile"]} Modlist?:{manifest["is_modlist"]}", "info")
+
         if manifest["is_savefile"]:
 
-            chosen_world = self.get_worlds_of_mod_profile(chosen_mod_profile["path"])
+            chosen_world = self.get_worlds_of_mod_profile(chosen_mod_profile["path"], add_world=True)
+            profile_saves_dir = chosen_world["path"].parent
             if not chosen_world:
                 return True
             print(f"{Fore.WHITE}World Directory: {chosen_world["path"]}")
 
-            # Review world name
-            if chosen_world["name"] != archive_path.stem:
-                msg = Fore.YELLOW + f"`{archive_name}` doesn't match `{profile_folder_with_ext}`, proceed anyway"
-                if not self.get_consent(msg):
+            chosen_world_is_fake = chosen_world["fake_world"]
+            if chosen_world_is_fake:
+                def _validate_world_name(raw: str):
+                    raw = raw.strip()
+                    if raw == "":
+                        return None
+                    # allow letters, numbers, spaces, hyphens and underscores only
+                    if not re.match(r'^[A-Za-z0-9 _-]+$', raw):
+                        raise ValueError("Name contains invalid characters")
+                    candidate_dir = profile_saves_dir / raw
+                    if candidate_dir.exists():
+                        raise ValueError("A directory with that name already exists")
+                    return raw
+
+                name = self.query_input_with_retry(
+                    f"{Fore.WHITE}\nEnter a Name for your New World:\n > ",
+                    _validate_world_name,
+                    cancel_values=("c", "q"),
+                    error_message="Invalid world name."
+                )
+                if name is None:
                     return True
+                # store the chosen name/path for later steps
+                chosen_world["name"] = name
+                chosen_world["path"] = profile_saves_dir / name
+
+
+            # Review world name
+            if not chosen_world_is_fake:
+                if chosen_world["name"] != archive_path.stem:
+                    msg = Fore.YELLOW + f"`{archive_name}` doesn't match `{profile_folder_with_ext}`, proceed anyway"
+                    if not self.get_consent(msg):
+                        return True
             
             # Review and install
             print("\n" + self.DIVIDER)
@@ -373,9 +408,6 @@ class App:
         elif manifest["is_modlist"]:
 
             # Check if archive name matches profile
-            archive_name = archive_path.name
-            archive_stem = archive_path.stem
-            profile_folder_with_ext = f"{chosen_mod_profile['folder']}{archive_path.suffix}"
             if archive_name != profile_folder_with_ext:
                 msg = Fore.YELLOW + f"`{archive_name}` doesn't match `{profile_folder_with_ext}`, proceed anyway"
                 if not self.get_consent(msg):
@@ -514,11 +546,11 @@ class App:
         choice = self.query_numeric_input(len(profiles))
         return None if choice is None else profiles[choice - 1]
     
-    def get_worlds_of_mod_profile(self, profile_path):
+    def get_worlds_of_mod_profile(self, profile_path, add_world=False):
         self._log("GET -> get_worlds_of_mod_profile", "info")
 
         undb = UnDBJ(profile_path)
-        worlds = undb.get_internal_worlds()
+        worlds = undb.get_internal_worlds(add_world=add_world)
         
         if not worlds:
             self.operation_text = Fore.RED + "No worlds were detected in this mod profile."

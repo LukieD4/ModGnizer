@@ -149,6 +149,7 @@ def install_world(
 
     target_world_path = chosen_world["path"]
     target_world_name = chosen_world["name"]
+    target_is_fake = chosen_world["fake_world"]
 
     # Gather files
     extracted_files = [p for p in Path(extracted_path).rglob("*") if p.is_file()]
@@ -217,16 +218,17 @@ def install_world(
 
     print(Fore.YELLOW + f"\nDetected {mismatches} mismatched or new files.")
 
-    # First confirmation
-    if not get_consent(Fore.YELLOW + "Proceed with world installation (this will replace the world)"):
-        set_operation_text("Installation cancelled.")
-        return True
+    if not target_is_fake:
+        # First confirmation
+        if not get_consent(Fore.YELLOW + "Proceed with world installation (this will replace the world)"):
+            set_operation_text("Installation cancelled.")
+            return True
 
-    # Second confirmation
-    print("\n" + Fore.RED + "WARNING: This will DELETE the existing world folder.")
-    if not get_consent(Fore.RED + "Are you absolutely sure you want to continue"):
-        set_operation_text("Installation cancelled at final confirmation.")
-        return True
+        # Second confirmation
+        print("\n" + Fore.RED + "WARNING: This will DELETE the existing world folder.")
+        if not get_consent(Fore.RED + "Are you absolutely sure you want to continue"):
+            set_operation_text("Installation cancelled at final confirmation.")
+            return True
 
     # Backup + wipe + install
     short_ts = datetime.now().strftime("%Y%m%d%H%M%S")
@@ -234,11 +236,14 @@ def install_world(
     backup_root.mkdir(parents=True, exist_ok=True)
 
     try:
-        # Backup existing world
-        shutil.copytree(target_world_path, backup_root / target_world_name)
+        if not target_is_fake:
+            # Backup existing world
+            shutil.copytree(target_world_path, backup_root / target_world_name)
 
-        # Wipe world folder
-        shutil.rmtree(target_world_path)
+            # Wipe world folder
+            shutil.rmtree(target_world_path)
+        
+        # Make new directory
         target_world_path.mkdir(parents=True, exist_ok=True)
 
         # Install extracted world

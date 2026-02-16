@@ -34,7 +34,7 @@ class UnDBJ:
         print(f"Unsupported profile source: {self.source_path}")
         return []
     
-    def get_internal_worlds(self):
+    def get_internal_worlds(self, add_world:bool=None):
         worlds = []
 
         try:
@@ -42,23 +42,42 @@ class UnDBJ:
             if not base.exists() or not base.is_dir():
                 return worlds
 
-            # Each instance is typically a directory under the Instances folder
-            for inst in sorted(base.iterdir()):
-                try:
-                    if not inst.is_dir():
-                        continue
+            sorted_base_dirs = sorted(base.iterdir())
+            last_index = len(sorted_base_dirs) - 1
 
-                    worlds.append({
+            for i, inst in enumerate(sorted_base_dirs):
+
+                # Iterate through real existing worlds by the user
+                try:
+                    if inst.is_dir():
+                        worlds.append({
                             "path": inst,
                             "name": inst.name,
                             "last_played": int(inst.stat().st_mtime) if inst.exists() else None,
+                            "fake_world": False
                         })
                 except:
                     pass
+
+                # Add a fake entry used for New World making
+                if add_world and i == last_index:
+
+                    # Overwrite inst with a fake path
+                    time = int(datetime.now().timestamp())
+                    inst = inst.parent / f"➕  Create a New World!"
+
+                    worlds.append({
+                        "path": inst,
+                        "name": inst.name,
+                        "last_played": None,
+                        "fake_world": True
+                    })
+
+
             return self._format_worlds(worlds)
-        
-        except Exception as e:
-            pass
+
+        except Exception:
+            return worlds
 
 
     # -------------------------

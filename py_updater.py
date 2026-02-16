@@ -62,8 +62,8 @@ def _normalize_version(v: str):
 
     return tuple(nums)
 
-def is_newer(local: str, remote: str) -> bool:
-    return _normalize_version(remote) > _normalize_version(local)
+def is_latest_update(local: str, remote: str) -> bool:
+    return _normalize_version(local) >= _normalize_version(remote)
 
 def download_file(url: str, dest: Path):
     print(url,dest)
@@ -80,8 +80,9 @@ def check_for_updates(version_file: Path, consent_callback=None):
         remote_tag, url, changelog, asset_name = get_latest_release()
 
         print(clean_markdown(changelog))
+        print(f"\nYour version: {local}\nLatest version: {remote_tag}\nIs latest? {is_latest_update(local,remote_tag)}")
 
-        if is_newer(local, remote_tag): return False
+        if is_latest_update(local, remote_tag): return False
 
         if not consent_callback():
             return False
@@ -125,10 +126,8 @@ def check_for_updates(version_file: Path, consent_callback=None):
             creationflags=subprocess.CREATE_NO_WINDOW
         )
 
-        print("\n\nYou can now close this app, it has now been updated :3")
-        time.sleep(2)
-
-        return True
+        while True:
+            input("\n\nYou can now close this app, it has now been updated :3\nYou are free to delete the old version.")
 
 
     except Exception as e:
