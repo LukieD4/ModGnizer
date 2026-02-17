@@ -10,8 +10,6 @@ import winreg, send2trash, shutil
 # -------------------------
 # COLORAMA (UI Enhancements)
 # -------------------------
-from colorama import init, Fore, Style
-init(autoreset=True)
 
 
 class App:
@@ -45,7 +43,7 @@ class App:
 
     @staticmethod
     def is_running_as_exe():
-        # return True
+        return True
         if "__compiled__" in globals():
             return True
         return False
@@ -66,7 +64,7 @@ class App:
     def __init__(self):
         self.debug = False
         self.log = None
-        self._cls_skip = 2
+        self._cls_skip = 1
         
         # Check for updates and ask user consent
         user_accepted_update = check_for_updates(

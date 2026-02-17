@@ -4,11 +4,13 @@ from pathlib import Path
 import sys
 import subprocess
 from urllib.parse import urlparse
-import time
+from py_imports import Fore
 
 GITHUB_API = "https://api.github.com/repos/LukieD4/ModGnizer/releases/latest"
 
 def clean_markdown(text: str) -> str:
+    text = re.sub(r"<[^>]*>", "", text)
+
     lines = text.splitlines()
     cleaned = []
     for line in lines:
@@ -16,6 +18,7 @@ def clean_markdown(text: str) -> str:
         line = line.replace("**", "").replace("*", "")
         cleaned.append(line)
     return "\n".join(cleaned)
+
 
 def get_local_version(version_file: Path) -> str:
     if not version_file.exists():
@@ -28,6 +31,7 @@ def get_latest_release():
     data = resp.json()
 
     tag = data.get("tag_name", "") or data.get("name", "") or ""
+    tag = tag.removeprefix("v")
 
     assets = data.get("assets", [])
     download_url = assets[0]["browser_download_url"] if assets else ""
@@ -79,29 +83,48 @@ def check_for_updates(version_file: Path, consent_callback=None):
         local = get_local_version(version_file)
         remote_tag, url, changelog, asset_name = get_latest_release()
 
-        print(clean_markdown(changelog))
-        print(f"\nYour version: {local}\nLatest version: {remote_tag}\nIs latest? {is_latest_update(local,remote_tag)}")
+        # Print changelog (generic text)
+        print(Fore.WHITE + "--> Changelog: <--\n"+clean_markdown(changelog))
 
-        if is_latest_update(local, remote_tag): return False
+        print(
+            Fore.WHITE
+            + f"\nYour version: v{local}"
+            + f"\nLatest version: v{remote_tag}"
+            + f"\nIs latest? {is_latest_update(local, remote_tag)}"
+        )
+
+        if is_latest_update(local, remote_tag):
+            input(
+                Fore.YELLOW
+                + "\nYou are currently up-to-date."
+                + Fore.LIGHTBLACK_EX
+                + "\n > Press ENTER to continue."
+            )
+            return False
+        else:
+            input(
+                Fore.YELLOW
+                + "\nA new update is available!"
+                + Fore.LIGHTBLACK_EX
+                + "\n > Press ENTER to continue."
+            )
 
         if not consent_callback():
             return False
 
         if not url:
-            print("Update check failed: release has no downloadable asset.")
+            print(Fore.RED + "Update check failed: release has no downloadable asset.")
             return False
 
-        print("\nDownloading update...")
+        print(Fore.YELLOW + "\nDownloading update...")
 
         # IMPORTANT: use the ORIGINAL EXE, not the temp one
         exe_path = Path(sys.argv[0]).resolve()
 
         # If running from a .py file, pretend the exe exists for testing
         if exe_path.suffix == ".py":
-            print("Running in test mode: simulating .exe path")
+            print(Fore.LIGHTBLACK_EX + "Running in test mode: simulating .exe path")
             exe_path = exe_path.with_suffix(".exe")
-
-
 
         # New EXE name from GitHub asset
         new_exe_path = exe_path.with_name(asset_name)
@@ -127,9 +150,15 @@ def check_for_updates(version_file: Path, consent_callback=None):
         )
 
         while True:
-            input("\n\nYou can now close this app, it has now been updated :3\nYou are free to delete the old version.")
-
+            input(
+                Fore.GREEN
+                + "\n\nUpdate complete!"
+                + Fore.WHITE
+                + "\nYou can now close this app."
+                + Fore.LIGHTBLACK_EX
+                + "\nYou are free to delete the old version."
+            )
 
     except Exception as e:
-        print(f"Update check failed: {e}")
+        print(Fore.RED + f"Update check failed: {e}")
         return False
