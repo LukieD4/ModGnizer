@@ -44,7 +44,7 @@ class App:
 
     @staticmethod
     def is_running_as_exe():
-        return True
+        # return True
         if "__compiled__" in globals():
             return True
         return False
