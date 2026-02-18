@@ -180,6 +180,7 @@ class TmpFilesClient:
             Linux / macOS:
             cat mods.rar0.zip mods.rar1.zip mods.rar2.zip > mods.rar
         """
+
         file_path = Path(file_path)
         if not file_path.exists() or not file_path.is_file():
             raise TmpFilesError(f"File not found: {file_path}")
@@ -200,16 +201,40 @@ class TmpFilesClient:
         payloads: List[Any] = []
 
         print("Chunking ...")
+
+        # --- NEW: progress tracking ---
+        uploaded_bytes = 0
+        start_time = time.time()
+
         try:
             for p in parts:
+                part_size = p.stat().st_size
+
+                # --- NEW: compute remaining + ETA ---
+                bytes_left = file_size - uploaded_bytes
+                elapsed = time.time() - start_time
+                speed = uploaded_bytes / elapsed if elapsed > 0 else 0
+                eta_seconds = (bytes_left / speed) if speed > 0 else float("inf")
+
+                if eta_seconds == float("inf"):
+                    eta_str = "calculating..."
+                else:
+                    mins, secs = divmod(int(eta_seconds), 60)
+                    eta_str = f"{mins}m {secs}s"
+
+                print(f"Uploading part: {p.name} ({part_size} bytes)")
+                print(f"         *Remaining: {bytes_left:,} bytes*\n        ->ETA: {eta_str}")
+
                 # Reuse the upload() method so we keep consistent request handling
-                print(f"Uploading part: {p.name} ({p.stat().st_size} bytes)")
                 resp = self.upload(p)
                 link = resp.get("link") or resp.get("share_url") or resp.get("direct_url")
                 if not link:
                     raise TmpFilesError(f"Upload succeeded but no link returned for part: {p.name}")
                 links.append(link)
                 payloads.append(resp.get("payload"))
+
+                uploaded_bytes += part_size  # update progress
+
         except Exception as e:
             # Attempt best-effort cleanup of parts on failure
             for p in parts:
@@ -230,6 +255,7 @@ class TmpFilesClient:
 
         return {"links": links, "parts": parts, "payloads": payloads}
 
+
     # -------------------------
     # DOWNLOAD
     # -------------------------
@@ -249,6 +275,8 @@ class TmpFilesClient:
         Raises:
             TmpFilesError on any failure.
         """
+        import time  # added for ETA timing
+
         if not isinstance(manifest, dict):
             raise TmpFilesError("Manifest must be a dict.")
 
@@ -258,19 +286,35 @@ class TmpFilesClient:
 
         # Download each link using existing download() method
         downloaded_parts: list[Path] = []
+
+        total_parts = len(links)
+        start_time = time.time()
+        completed_parts = 0
+
         for idx, link in enumerate(links, start=1):
             try:
-                print(f"Downloading part [{idx}/{len(links)}]: {link}")
+                # --- NEW: ETA + remaining parts ---
+                parts_left = total_parts - completed_parts
+                elapsed = time.time() - start_time
+                speed = completed_parts / elapsed if elapsed > 0 else 0
+                eta_seconds = (parts_left / speed) if speed > 0 else float("inf")
+
+                if eta_seconds == float("inf"):
+                    eta_str = "calculating..."
+                else:
+                    mins, secs = divmod(int(eta_seconds), 60)
+                    eta_str = f"{mins}m {secs}s"
+
+                print(f"Downloading part [{idx}/{total_parts}]: {link}")
+                print(f"        ->ETA: {eta_str}")
+
                 p = self.download(link)
                 downloaded_parts.append(p)
+                completed_parts += 1
+
                 print(f"Saved: {p}")
+
             except Exception as e:
-                # Best-effort cleanup of any parts already downloaded
-                for q in downloaded_parts:
-                    try:
-                        q.unlink(missing_ok=True)
-                    except Exception:
-                        pass
                 raise TmpFilesError(f"Failed to download part {link}: {e}") from e
 
         # If only one part and we have an internal name, rename to preserve original filename
@@ -411,12 +455,13 @@ class TmpFilesClient:
         header_split_text = text.splitlines()[0].lower()
         shareType_split_text = text.splitlines()[2].lower()
         is_modlist = "modlist" in shareType_split_text
-        is_savefile = "savefile" in shareType_split_text
+        is_savefolder = "savefolder" in shareType_split_text
         is_modgnizer = "gnizer" in header_split_text
 
-        if not is_modlist and not is_savefile:
+        if not is_modlist and not is_savefolder:
             raise ValueError("Manifest doesn't know how to handle this. Did you highlight and copy everything?")
 
+        type_of_install = "modlist" if is_modlist else "savefolder"
 
         # Extract tmpfiles.org urls (preserve order)
         urls = re.findall(r"https?://(?:www\.)?tmpfiles\.org/[^\s`]+", text, flags=re.IGNORECASE)
@@ -445,7 +490,8 @@ class TmpFilesClient:
                 "timestamp": timestamp,
                 "links": urls,
                 "is_modlist": is_modlist,
-                "is_savefile": is_savefile, 
+                "is_savefolder": is_savefolder, 
+                "type_of_install": type_of_install
             }
 
         # Not an explicit MODGNIZER block — fallback to plain links

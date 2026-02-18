@@ -80,17 +80,25 @@ class ArchiveBundler:
         cmd = [
             str(self.sevenz_path),
             "a",
-            "-r",
+            "-t7z",          # use 7z format (best compression)
+            "-r",            # recurse into subdirectories
+            "-m0=lzma2",     # LZMA2 algorithm
+            "-mx=9",         # ultra compression
+            "-mmt=on",       # multithreading
+            "-ms=on",        # solid archive
+            "-mfb=273",      # max fast bytes
+            "-md=1024m",     # max dictionary size (1GB)
             str(output_file),
             source
         ]
 
         if password:
-            cmd.insert(2, f"-p{password}")
-            cmd.insert(3, "-mhe=on")
+            cmd.insert(3, f"-p{password}")  # set password
+            cmd.insert(4, "-mhe=on")        # encrypt headers
 
         subprocess.run(cmd, check=True)
         return output_file
+
 
 
     
@@ -104,14 +112,19 @@ class ArchiveBundler:
         cmd = [
             str(self.winrar_path),
             "a",
-            "-r",      # recurse into subdirectories
-            "-ep1",    # strip base path (prevents absolute paths)
+            "-r",          # recurse into subdirectories
+            "-ep1",        # strip base path (prevents absolute paths)
+            "-ma5",        # use RAR5 format (better compression)
+            "-m5",         # best compression level
+            "-s",          # solid archive (major compression boost)
+            "-md1024",     # max dictionary size (1GB)
             str(output_file),
             source
         ]
 
         if password:
-            cmd.insert(3, f"-hp{password}")  # full encryption + hide file list
+            # full encryption + hide file list
+            cmd.insert(3, f"-hp{password}")
 
         subprocess.run(cmd, check=True)
         return output_file
@@ -121,13 +134,24 @@ class ArchiveBundler:
 
 
 
+
     def bundle_zip(self, output_file: Path):
+        # ZIP_DEFLATED = standard DEFLATE compression
+        # compresslevel=9 = maximum compression for DEFLATE
         compression = zipfile.ZIP_DEFLATED
-        with zipfile.ZipFile(output_file, "w", compression=compression) as zipf:
+
+        with zipfile.ZipFile(
+            output_file,
+            "w",
+            compression=compression,
+            compresslevel=9  # max compression level for ZIP
+        ) as zipf:
             for root, _, files in os.walk(self.source_folder):
                 for file in files:
                     full_path = Path(root) / file
                     arcname = full_path.relative_to(self.source_folder)
                     zipf.write(full_path, arcname)
+
         return output_file
+
 

@@ -4,6 +4,7 @@ from py_archive import ArchiveBundler
 from py_undbj import UnDBJ
 from py_tmpfiles import TmpFilesClient, TmpFilesError
 from py_report import review_and_install_mods, install_world
+from py_secure import scan_extraction, auto_scan
 from py_updater import check_for_updates
 import winreg, send2trash, shutil
 
@@ -69,7 +70,7 @@ class App:
         # Check for updates and ask user consent
         user_accepted_update = check_for_updates(
             self.get_temp_runtime_base() / self.VERSION_FILE,
-            lambda:self.get_consent("\n\n\n\n\nA new version is available. Do you want to update")
+            lambda:self.get_consent("\n\n\n\n\nDo you want to update")
         ) if self.is_running_as_exe() else False
         if not user_accepted_update: self.cls()
         
@@ -182,10 +183,10 @@ class App:
 
         print(Fore.YELLOW + f"\nDelete:\n{temp_path}\nTotal size: {self.format_bytes(temp_bytes)}")
         
-        if not self.get_consent("Are you sure you want to clear the temp cache\nTHIS WILL DELETE BACKUPS TOO!!"):
+        if not self.get_consent("This WILL DELETE BACKUPS and shared lists!\nAre you sure you want to clear the %temp%\Gnizer"):
             return True
 
-        if self.clear_Gnizer_temp():
+        if self.clear_gnizer_temp():
             print(Fore.GREEN + "Temp cache cleared.")
             self.refresh_main_menu()
         else:
@@ -256,11 +257,11 @@ class App:
                 self.operation_text = Fore.RED + f"Unexpected error: {e}"
             return True
 
-        print(Fore.BLUE + f"Archive created on Desktop: {output_path}")
+        print(Fore.BLUE + f"Archive created in %TEMP%: {output_path}")
         
         # Ask about upload
         try:
-            self.get_consent_upload_to_fileio(output_path, "savefile")
+            self.get_consent_upload_to_fileio(output_path, "savefolder")
         except Exception as e:
             self._log(e,"critical")
             self.operation_text = Fore.RED + f"Upload step failed: {e}"
@@ -276,6 +277,7 @@ class App:
 
         kind, value = source
         archive_path = None
+        manifest = None
 
         self._log(f"KIND -> {kind}", "info")
         if kind == "clipboard":
@@ -313,7 +315,29 @@ class App:
         # Extract archive
         extracted_path = None
         try:
+        
             extracted_path = ArchiveBundler.extract_archive(archive_path, password=password)
+            auto_scan_installation_type = auto_scan(extracted_path)
+
+            # This should be reworked, it's a patch to prevent manifest from being NoneType
+            manifest = {"type_of_install":auto_scan_installation_type} if not manifest else manifest  
+
+            # Detect a tampered manifest
+            if auto_scan_installation_type != manifest["type_of_install"]:
+                input(Fore.RED + "\nIt looks like someone has sent you a potentially tampered copy/paste which could've harmed your Minecraft world or mod installation.\n > Press ENTER to return back to the main menu")
+                return True
+
+                      
+            
+            is_safe, final_message, scan_results = scan_extraction(extracted_path, manifest["type_of_install"])
+            if not is_safe:
+                print("\n" + self.DIVIDER + "\n" + final_message)
+                if not self.get_consent(Fore.RED + f"""
+There are unusual file types inside the {manifest["type_of_install"]} download, these could potentially harm your device.
+This could be a false positive as this scan was made without mods in mind.\n-> Do you still want to continue"""):
+                    return True
+        
+        
         except Exception as e:
             self._log(e,"critical")
             exit_code = e.args[0]
@@ -345,86 +369,86 @@ class App:
         archive_name = archive_path.name
         archive_stem = archive_path.stem
         profile_folder_with_ext = f"{chosen_mod_profile['folder']}{archive_path.suffix}"
-        self._log(f"HANDLE -> Savefile?:{manifest["is_savefile"]} Modlist?:{manifest["is_modlist"]}", "info")
+        self._log(f"HANDLE -> Type of install {manifest["type_of_install"]}", "info")
 
-        if manifest["is_savefile"]:
+        match manifest["type_of_install"]:
+            case "savefolder":
 
-            chosen_world = self.get_worlds_of_mod_profile(chosen_mod_profile["path"], add_world=True)
-            profile_saves_dir = chosen_world["path"].parent
-            if not chosen_world:
-                return True
-            print(f"{Fore.WHITE}World Directory: {chosen_world["path"]}")
-
-            chosen_world_is_fake = chosen_world["fake_world"]
-            if chosen_world_is_fake:
-                def _validate_world_name(raw: str):
-                    raw = raw.strip()
-                    if raw == "":
-                        return None
-                    # allow letters, numbers, spaces, hyphens and underscores only
-                    if not re.match(r'^[A-Za-z0-9 _-]+$', raw):
-                        raise ValueError("Name contains invalid characters")
-                    candidate_dir = profile_saves_dir / raw
-                    if candidate_dir.exists():
-                        raise ValueError("A directory with that name already exists")
-                    return raw
-
-                name = self.query_input_with_retry(
-                    f"{Fore.WHITE}\nEnter a Name for your New World:\n > ",
-                    _validate_world_name,
-                    cancel_values=("c", "q"),
-                    error_message="Invalid world name."
-                )
-                if name is None:
+                chosen_world = self.get_worlds_of_mod_profile(chosen_mod_profile["path"], add_world=True)
+                profile_saves_dir = chosen_world["path"].parent
+                if not chosen_world:
                     return True
-                # store the chosen name/path for later steps
-                chosen_world["name"] = name
-                chosen_world["path"] = profile_saves_dir / name
+                print(f"{Fore.WHITE}World Directory: {chosen_world["path"]}")
+
+                chosen_world_is_fake = chosen_world["fake_world"]
+                if chosen_world_is_fake:
+                    def _validate_world_name(raw: str):
+                        raw = raw.strip()
+                        if raw == "":
+                            return None
+                        # allow letters, numbers, spaces, hyphens and underscores only
+                        if not re.match(r'^[A-Za-z0-9 _-]+$', raw):
+                            raise ValueError("Name contains invalid characters")
+                        candidate_dir = profile_saves_dir / raw
+                        if candidate_dir.exists():
+                            raise ValueError("A directory with that name already exists")
+                        return raw
+
+                    name = self.query_input_with_retry(
+                        f"{Fore.WHITE}\nEnter a Name for your New World:\n > ",
+                        _validate_world_name,
+                        cancel_values=("c", "q"),
+                        error_message="Invalid world name."
+                    )
+                    if name is None:
+                        return True
+                    # store the chosen name/path for later steps
+                    chosen_world["name"] = name
+                    chosen_world["path"] = profile_saves_dir / name
 
 
-            # Review world name
-            if not chosen_world_is_fake:
-                if chosen_world["name"] != archive_path.stem:
+                # Review world name
+                if not chosen_world_is_fake:
+                    if chosen_world["name"] != archive_path.stem:
+                        msg = Fore.YELLOW + f"`{archive_name}` doesn't match `{profile_folder_with_ext}`, proceed anyway"
+                        if not self.get_consent(msg):
+                            return True
+                
+                # Review and install
+                print("\n" + self.DIVIDER)
+                try:
+                    install_world(
+                        extracted_path,
+                        chosen_world,
+                        self.get_consent,
+                        lambda text: setattr(self, "operation_text", text)
+                    )
+                except Exception as e:
+                    self._log(e,"critical")
+                    self.operation_text = Fore.RED + f"Review/install step failed: {e}"
+
+        
+            case "modlist":
+                # Check if archive name matches profile
+                if archive_name != profile_folder_with_ext:
                     msg = Fore.YELLOW + f"`{archive_name}` doesn't match `{profile_folder_with_ext}`, proceed anyway"
                     if not self.get_consent(msg):
                         return True
-            
-            # Review and install
-            print("\n" + self.DIVIDER)
-            try:
-                install_world(
-                    extracted_path,
-                    chosen_world,
-                    self.get_consent,
-                    lambda text: setattr(self, "operation_text", text)
-                )
-            except Exception as e:
-                self._log(e,"critical")
-                self.operation_text = Fore.RED + f"Review/install step failed: {e}"
 
-        
-        elif manifest["is_modlist"]:
-
-            # Check if archive name matches profile
-            if archive_name != profile_folder_with_ext:
-                msg = Fore.YELLOW + f"`{archive_name}` doesn't match `{profile_folder_with_ext}`, proceed anyway"
-                if not self.get_consent(msg):
-                    return True
-
-            # Review and install
-            print("\n" + self.DIVIDER)
-            try:
-                review_and_install_mods(
-                    extracted_path,
-                    chosen_mod_manager,
-                    chosen_mod_profile,
-                    self.get_consent,
-                    lambda text: setattr(self, "operation_text", text)
-                )
-            except Exception as e:
-                self._log(e,"critical")
-                self.operation_text = Fore.RED + f"Review/install step failed: {e}"
-            
+                # Review and install
+                print("\n" + self.DIVIDER)
+                try:
+                    review_and_install_mods(
+                        extracted_path,
+                        chosen_mod_manager,
+                        chosen_mod_profile,
+                        self.get_consent,
+                        lambda text: setattr(self, "operation_text", text)
+                    )
+                except Exception as e:
+                    self._log(e,"critical")
+                    self.operation_text = Fore.RED + f"Review/install step failed: {e}"
+                
         return True
 
     def menu_bundle_mods_to_archive(self):
@@ -718,7 +742,7 @@ class App:
         self._log("GET (CONSENT) -> get_consent_upload_to_fileio", "info")
 
         if not type_of_upload:
-            self.operation_text = Fore.RED + "(internal error) type_of_upload was not declared, is it a modlist or savefile?"
+            self.operation_text = Fore.RED + "(internal error) type_of_upload was not declared, is it a modlist or savefolder?"
 
         if not archive_path.exists() or not archive_path.is_file():
             self.operation_text = Fore.RED + "Archive not found for upload."
@@ -919,8 +943,8 @@ Date of {type_of_upload}: {timestamp}*
             self._log(e,"critical")
             print(Fore.RED + f"Failed to open Notepad: {e}")
 
-    def clear_Gnizer_temp(self):
-        self._log("DELETE -> clear_Gnizer_temp", "info")
+    def clear_gnizer_temp(self):
+        self._log("DELETE -> clear_gnizer_temp", "info")
         temp_root = Path(os.environ.get("TEMP", Path.home() / "AppData/Local/Temp"))
         temp_dir = temp_root / "Gnizer"
         
