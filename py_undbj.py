@@ -110,7 +110,7 @@ class UnDBJ:
                 if not os.path.exists(path): continue
 
                 profiles.append({
-                    "path": Path(os.environ["APPDATA"]) / "ModrinthApp" / "profiles" / internal_name,
+                    "path": path,
                     "folder": internal_name,
                     "name": name,
                     "game_version": game_version,
@@ -299,9 +299,10 @@ class UnDBJ:
 
 
         # Determine padding widths
-        max_name = max(len(p["name"]) for p in profiles)
-        max_version = max(len(p["game_version"]) for p in profiles)
-        max_loader = max(len(p["mod_loader"]) for p in profiles)
+        if len(profiles) > 0:
+            max_name = max(len(p["name"]) for p in profiles)
+            max_version = max(len(p["game_version"]) for p in profiles)
+            max_loader = max(len(p["mod_loader"]) for p in profiles)
 
         # Build display strings
         for p in profiles:
