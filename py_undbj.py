@@ -45,33 +45,40 @@ class UnDBJ:
             sorted_base_dirs = sorted(base.iterdir())
             last_index = len(sorted_base_dirs) - 1
 
-            for i, inst in enumerate(sorted_base_dirs):
+            # This is made this way to patch the bug which happens when the user has no worlds, crashing the app.
+            def add_fake_world(inst=None):
+                # Overwrite inst with a fake path
+                time = int(datetime.now().timestamp())
+                inst = inst.parent / f"➕  Create a New World!"
 
-                # Iterate through real existing worlds by the user
-                try:
-                    if inst.is_dir():
-                        worlds.append({
-                            "path": inst,
-                            "name": inst.name,
-                            "last_played": int(inst.stat().st_mtime) if inst.exists() else None,
-                            "fake_world": False
-                        })
-                except:
-                    pass
+                return {
+                    "path": inst,
+                    "name": inst.name,
+                    "last_played": None,
+                    "fake_world": True
+                }
 
-                # Add a fake entry used for New World making
-                if add_world and i == last_index:
 
-                    # Overwrite inst with a fake path
-                    time = int(datetime.now().timestamp())
-                    inst = inst.parent / f"➕  Create a New World!"
+            if len(sorted_base_dirs) > 0:
+                for i, inst in enumerate(sorted_base_dirs):
 
-                    worlds.append({
-                        "path": inst,
-                        "name": inst.name,
-                        "last_played": None,
-                        "fake_world": True
-                    })
+                    # Iterate through real existing worlds by the user
+                    try:
+                        if inst.is_dir():
+                            worlds.append({
+                                "path": inst,
+                                "name": inst.name,
+                                "last_played": int(inst.stat().st_mtime) if inst.exists() else None,
+                                "fake_world": False
+                            })
+                    except:
+                        pass
+
+                    # Add a fake entry used for New World making
+                    if add_world and i == last_index:
+                        worlds.append(add_fake_world(inst))
+            else:
+                worlds.append(add_fake_world(Path(base/"c2VsZWN0aW9uY2hhcmFjdGVyaXN0aWNtaWdodHlhbW91bnR2b2x1bWV6b295ZXRzdWk="))) # this is a random placeholder, do not touch, the function grabs the parent anyway
 
 
             return self._format_worlds(worlds)

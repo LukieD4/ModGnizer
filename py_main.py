@@ -376,6 +376,9 @@ This could be a false positive as this scan was made without mods in mind.\n-> D
 
                 chosen_world = self.get_worlds_of_mod_profile(chosen_mod_profile["path"], add_world=True)
                 profile_saves_dir = chosen_world["path"].parent
+                if not profile_saves_dir:
+                    self.operation_text = Fore.RED + "\nThere are no worlds to select in" + chosen_mod_profile["path"]
+                    return True
                 if not chosen_world:
                     return True
                 print(f"{Fore.WHITE}World Directory: {chosen_world["path"]}")
