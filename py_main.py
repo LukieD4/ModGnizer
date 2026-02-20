@@ -43,7 +43,7 @@ class App:
 
     @staticmethod
     def is_running_as_exe():
-        # return True
+        return True
         if "__compiled__" in globals():
             return True
         return False
@@ -69,7 +69,7 @@ class App:
         # Check for updates and ask user consent
         user_accepted_update = check_for_updates(
             self.get_temp_runtime_base() / self.VERSION_FILE,
-            lambda:self.get_consent("\n\n\n\n\nDo you want to update"), past_n=2
+            lambda:self.get_consent("\n\n\n\n\nDo you want to update"), past_n=8
         ) if self.is_running_as_exe() else False
         if not user_accepted_update: self.cls()
         

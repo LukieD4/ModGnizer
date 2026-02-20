@@ -8,6 +8,7 @@ _VERSION_PARTS = 3
 
 # Base API endpoint for releases (used to list releases)
 GITHUB_REPO_API = "https://api.github.com/repos/LukieD4/ModGnizer/releases"
+GITHUB_REPO_URL = "https://github.com/LukieD4/ModGnizer/releases"
 
 # If you set GITHUB_TOKEN env var, we'll use it to increase GitHub rate limits
 _GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
@@ -150,7 +151,7 @@ def check_for_updates(version_file: Path, consent_callback=None, past_n: int = 1
         changelogs = list(reversed(changelogs))        
 
         if changelogs:
-            print(Fore.WHITE + f"--> Showing changelogs for the most recent {len(changelogs)} releases: <--\n")
+            print(Fore.WHITE + f"-> To view more historical changes visit: {GITHUB_REPO_URL}\n\n\n")
             for i, c in enumerate(changelogs, start=1):
                 hdr = f"v{c['tag']}" + (f" — published {c['published_at']}" if c['published_at'] else "")
                 print(Fore.YELLOW + hdr)
@@ -163,9 +164,6 @@ def check_for_updates(version_file: Path, consent_callback=None, past_n: int = 1
         # // Latest CHANGELOGS //
         local = get_local_version(version_file)
         remote_tag, url, changelog, asset_name = get_latest_release()
-
-        # Print latest changelog (generic text)
-        print("\n\n\n\n\n\n\n\n" + Fore.WHITE + "--> Latest release changelog: <--\n\n" + clean_markdown(changelog))
 
         print(
             Fore.WHITE

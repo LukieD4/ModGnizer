@@ -207,7 +207,7 @@ class TmpFilesClient:
 
         # --- NEW: progress tracking ---
         uploaded_bytes = 0
-        start_time = datetime.datetime.now()
+        start_time = datetime.now()
 
         try:
             for p in parts:
@@ -215,7 +215,7 @@ class TmpFilesClient:
 
                 # --- NEW: compute remaining + ETA ---
                 bytes_left = file_size - uploaded_bytes
-                elapsed = (datetime.datetime.now() - start_time).total_seconds()
+                elapsed = (datetime.now() - start_time).total_seconds()
                 speed = uploaded_bytes / elapsed if elapsed > 0 else 0
                 eta_seconds = (bytes_left / speed) if speed > 0 else float("inf")
 
