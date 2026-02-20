@@ -1,9 +1,12 @@
 # py_tmpfiles.py
 from __future__ import annotations
 from typing import Dict, Any, List
-from urllib.parse import urlparse
 from py_imports import *
-import requests
+
+from urllib.parse import urlparse
+from datetime import datetime
+from pathlib import Path
+import requests, os, re
 
 
 class TmpFilesError(Exception):
@@ -204,7 +207,7 @@ class TmpFilesClient:
 
         # --- NEW: progress tracking ---
         uploaded_bytes = 0
-        start_time = time.time()
+        start_time = datetime.datetime.now()
 
         try:
             for p in parts:
@@ -212,7 +215,7 @@ class TmpFilesClient:
 
                 # --- NEW: compute remaining + ETA ---
                 bytes_left = file_size - uploaded_bytes
-                elapsed = time.time() - start_time
+                elapsed = (datetime.datetime.now() - start_time).total_seconds()
                 speed = uploaded_bytes / elapsed if elapsed > 0 else 0
                 eta_seconds = (bytes_left / speed) if speed > 0 else float("inf")
 

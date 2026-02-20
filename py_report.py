@@ -1,8 +1,7 @@
 from py_imports import *
-import hashlib
-import shutil
-from typing import Callable
-from colorama import Fore
+import hashlib, shutil
+from datetime import datetime
+from pathlib import Path
 
 def _md5_of_file(p: Path, chunk_size: int = 8192) -> str:
     h = hashlib.md5()

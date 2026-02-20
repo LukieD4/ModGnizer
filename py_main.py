@@ -1,12 +1,11 @@
 from py_imports import *
-from PyQt5.QtWidgets import QApplication, QFileDialog
-from py_archive import ArchiveBundler
-from py_undbj import UnDBJ
-from py_tmpfiles import TmpFilesClient, TmpFilesError
-from py_report import review_and_install_mods, install_world
-from py_secure import scan_extraction, auto_scan
+
+import sys # Since it's used near towards the init
+import os # Used too frequent
+
+from pathlib import Path
+from datetime import datetime
 from py_updater import check_for_updates
-import winreg, send2trash, shutil
 
 # -------------------------
 # COLORAMA (UI Enhancements)
@@ -70,7 +69,7 @@ class App:
         # Check for updates and ask user consent
         user_accepted_update = check_for_updates(
             self.get_temp_runtime_base() / self.VERSION_FILE,
-            lambda:self.get_consent("\n\n\n\n\nDo you want to update")
+            lambda:self.get_consent("\n\n\n\n\nDo you want to update"), past_n=2
         ) if self.is_running_as_exe() else False
         if not user_accepted_update: self.cls()
         
@@ -181,9 +180,9 @@ class App:
             self.operation_text = "Temp cache is empty."
             return True
 
-        print(Fore.YELLOW + f"\nDelete:\n{temp_path}\nTotal size: {self.format_bytes(temp_bytes)}")
+        print(Fore.YELLOW + f"\nDelete: {temp_path} ({self.format_bytes(temp_bytes)})")
         
-        if not self.get_consent("This WILL DELETE BACKUPS and shared lists!\nAre you sure you want to clear the %temp%\Gnizer"):
+        if not self.get_consent("->This WILL DELETE BACKUPS and shared lists!\n->Are you sure you want to clear the Gnizer %temp%"):
             return True
 
         if self.clear_gnizer_temp():
@@ -231,6 +230,8 @@ class App:
             return True
 
         # Bundle the archive
+        # // Lazy import
+        from py_archive import ArchiveBundler
         bundler = ArchiveBundler(chosen_world["path"])
         format_handlers = {
             "zip": lambda: bundler.bundle_zip(output_path),
@@ -270,6 +271,12 @@ class App:
 
     def menu_load_data_from_archive(self):
         self._log("IN -> menu_load_data_from_archive","info")
+
+        # // Lazy import
+        from py_tmpfiles import TmpFilesClient, TmpFilesError
+        from py_archive import ArchiveBundler
+        from py_report import review_and_install_mods, install_world
+        import re
 
         source = self.get_archive_source()
         if not source:
@@ -315,6 +322,7 @@ class App:
         # Extract archive
         extracted_path = None
         try:
+            from py_secure import scan_extraction, auto_scan # // Lazy import 
         
             extracted_path = ArchiveBundler.extract_archive(archive_path, password=password)
             auto_scan_installation_type = auto_scan(extracted_path)
@@ -486,6 +494,8 @@ This could be a false positive as this scan was made without mods in mind.\n-> D
             return True
 
         # Bundle the archive
+        # // Lazy import
+        from py_archive import ArchiveBundler
         bundler = ArchiveBundler(mod_profile_path)
         format_handlers = {
             "zip": lambda: bundler.bundle_zip(output_path),
@@ -554,6 +564,8 @@ This could be a false positive as this scan was made without mods in mind.\n-> D
     def get_mod_profiles(self, chosen_mod_manager):
         self._log("GET -> get_mod_profiles", "info")
 
+        # // Lazy import
+        from py_undbj import UnDBJ
         undb = UnDBJ(chosen_mod_manager["db_path"])
         profiles = undb.get_internal_profiles()
         
@@ -574,6 +586,8 @@ This could be a false positive as this scan was made without mods in mind.\n-> D
     def get_worlds_of_mod_profile(self, profile_path, add_world=False):
         self._log("GET -> get_worlds_of_mod_profile", "info")
 
+        # // Lazy import
+        from py_undbj import UnDBJ
         undb = UnDBJ(profile_path)
         worlds = undb.get_internal_worlds(add_world=add_world)
         
@@ -594,6 +608,8 @@ This could be a false positive as this scan was made without mods in mind.\n-> D
     def get_archive_preferences(self):
         self._log("GET -> get_archive_preferences", "info")
 
+        # // Lazy import
+        from py_archive import ArchiveBundler
         bundler = ArchiveBundler(Path("."))
         available = {"1": "zip"}
         
@@ -673,6 +689,8 @@ This could be a false positive as this scan was made without mods in mind.\n-> D
             
             elif choice == "2":
                 try:
+                    # // Lazy imports
+                    from PyQt5.QtWidgets import QApplication, QFileDialog 
                     app = QApplication.instance() or QApplication(sys.argv)
                     file_path, _ = QFileDialog.getOpenFileName(
                         None, "Select Mod Archive",
@@ -733,6 +751,8 @@ This could be a false positive as this scan was made without mods in mind.\n-> D
                 return False
             
             try:
+                # // Lazy import
+                import send2trash
                 send2trash.send2trash(str(file_path))
                 print(Fore.BLUE + "Existing file moved to Recycle Bin.")
                 return True
@@ -760,6 +780,8 @@ This could be a false positive as this scan was made without mods in mind.\n-> D
             self.operation_text = "Archive bundled locally (upload skipped)"
             return
         
+        # // Lazy import
+        from py_tmpfiles import TmpFilesClient, TmpFilesError
         client = TmpFilesClient(timeout=120)
         try:
             print(Fore.BLUE + "Uploading to tmpfiles.org ...")
@@ -837,6 +859,7 @@ This could be a false positive as this scan was made without mods in mind.\n-> D
         self._log("DETECT -> detect_installed_app", "info")
         for reg_path in registry_paths:
             try:
+                import winreg # // Lazy import
                 with winreg.OpenKey(winreg.HKEY_CURRENT_USER, reg_path):
                     return True, reg_path
             except (FileNotFoundError, OSError):
@@ -870,6 +893,10 @@ This could be a false positive as this scan was made without mods in mind.\n-> D
 
     def save_links_md_and_copy_to_clipboard(self, links: list[str], original_file: Path, type_of_upload:str):
         self._log("SAVE -> save_links_md_and_copy_to_clipboard", "info")
+
+        # // Lazy imports
+        from PyQt5.QtWidgets import QApplication, QFileDialog
+
 
         if not links:
             return
@@ -926,6 +953,9 @@ Date of {type_of_upload}: {timestamp}*
     def read_from_clipboard(self):
         self._log("READ -> read_from_clipboard", "info")
 
+        # // Lazy imports
+        from PyQt5.QtWidgets import QApplication, QFileDialog
+
         app = QApplication.instance() or QApplication(sys.argv)
         text = app.clipboard().text()
         return text if text and text.strip() else None
@@ -954,7 +984,9 @@ Date of {type_of_upload}: {timestamp}*
         if not temp_dir.exists():
             return True
         
+        
         try:
+            import shutil # // Lazy import
             shutil.rmtree(temp_dir)
             self.operation_text = "Temp cache cleared successfully."
             return True
