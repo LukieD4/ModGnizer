@@ -4,8 +4,11 @@ from pathlib import Path
 from py_imports import *
 
 class UnDBJ:
-    def __init__(self, source_path):
-        self.source_path = Path(source_path)
+    def __init__(self, data):
+        try:
+            self.source_path = Path(data)
+        except:
+            self.data = data
 
     # -------------------------
     # PUBLIC API
@@ -90,6 +93,35 @@ class UnDBJ:
 
 
     # -------------------------
+    # MOD COMPAT
+    # -------------------------
+
+    def get_internal_profile_waypoints(self):
+
+        xaero_waypoints_path = Path(self.data["path"] / "xaero") 
+        if not xaero_waypoints_path:
+            return None
+        
+        xaero_minimap_path = Path(xaero_waypoints_path / "minimap")
+        xaero_worldmap_path = Path(xaero_waypoints_path / "world-map")
+
+        # check for matching directory names of children, if they appear in both dirs, add to list
+        xaero_instances = []
+        minimap_children = { p.name for p in xaero_minimap_path.iterdir() if p.is_dir() }
+        worldmap_children = { p.name for p in xaero_worldmap_path.iterdir() if p.is_dir() }
+        matching_instances = minimap_children.intersection(worldmap_children) # intersection = valid instances
+
+        for instance in sorted(matching_instances):
+            xaero_instances.append({
+                "name": instance,
+                "minimap_path": xaero_minimap_path / instance,
+                "worldmap_path": xaero_worldmap_path / instance
+                })
+
+        return xaero_instances
+
+
+    # -------------------------
     # MODRINTH (SQLite)
     # -------------------------
 
@@ -100,12 +132,12 @@ class UnDBJ:
             conn = sqlite3.connect(self.source_path)
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT path, name, game_version, mod_loader, last_played FROM profiles"
+                "SELECT path, name, last_played FROM instances"
             )
             rows = cursor.fetchall()
             conn.close()
 
-            for internal_name, name, game_version, mod_loader, last_played in rows:
+            for internal_name, name, last_played in rows:
                 
                 # Check if the directory actually exists (Modrinth doesn't properly synchronise records)
                 path = Path(os.environ["APPDATA"]) / "ModrinthApp" / "profiles" / internal_name
@@ -115,8 +147,8 @@ class UnDBJ:
                     "path": path,
                     "folder": internal_name,
                     "name": name,
-                    "game_version": game_version,
-                    "mod_loader": mod_loader,
+                    "game_version": "Unavailable", # Modrinth removed this field from the DB.
+                    "mod_loader": "Unavailable", # Modrinth removed this field from the DB.
                     "last_played": last_played,
                 })
 

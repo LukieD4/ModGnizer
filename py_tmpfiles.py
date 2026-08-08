@@ -6,7 +6,7 @@ from py_imports import *
 from urllib.parse import urlparse
 from datetime import datetime
 from pathlib import Path
-import requests, os, re
+import requests, os, re, time
 
 
 class TmpFilesError(Exception):
@@ -263,7 +263,7 @@ class TmpFilesClient:
     # DOWNLOAD
     # -------------------------
 
-    def download_from_paste(self, manifest: dict, cleanup_parts: bool = True) -> list[Path]:
+    def download_from_paste(self, manifest: dict, cleanup_parts: bool = True) -> tuple[Path, Path]:
         """
         Download parts described in a parsed MODGNIZER manifest.
 
@@ -272,14 +272,11 @@ class TmpFilesClient:
             cleanup_parts: if True, remove individual part files after successful reassembly/rename.
 
         Returns:
-            List[Path] - if multiple parts were downloaded but not reassembled, returns all part paths.
-                         If reassembled (or single part renamed), returns a single-element list with the final file path.
+            tuple[Path, Path] - a tuple containing the path to the first downloaded part (MD5 hash archive) and the path to the reassembled file.
 
         Raises:
             TmpFilesError on any failure.
         """
-        import time  # added for ETA timing
-
         if not isinstance(manifest, dict):
             raise TmpFilesError("Manifest must be a dict.")
 
@@ -291,16 +288,40 @@ class TmpFilesClient:
         downloaded_parts: list[Path] = []
 
         total_parts = len(links)
-        start_time = time.time()
-        completed_parts = 0
+        total_bytes_expected = manifest.get("size_bytes")
+        bytes_downloaded = 0
+
+        # A transfer sample only counts toward the speed estimate once it lasted at
+        # least this long. Tiny files (like the MD5 hash archive that always downloads
+        # first) can arrive in a single buffered read in a fraction of a millisecond,
+        # which would otherwise turn into a wildly noisy bytes/sec reading.
+        MIN_RELIABLE_TRANSFER_SECONDS = 0.1
+        speed_sample_bytes = 0
+        speed_sample_seconds = 0.0
 
         for idx, link in enumerate(links, start=1):
             try:
-                # --- NEW: ETA + remaining parts ---
-                parts_left = total_parts - completed_parts
-                elapsed = time.time() - start_time
-                speed = completed_parts / elapsed if elapsed > 0 else 0
-                eta_seconds = (parts_left / speed) if speed > 0 else float("inf")
+                # --- ETA: speed is measured only from the transfer phase of parts
+                # already downloaded (connection setup / TTFB excluded), starting with
+                # the small MD5 hash archive, then projected onto the remaining bytes
+                # of the manifest's known size ---
+                speed = (
+                    speed_sample_bytes / speed_sample_seconds
+                    if speed_sample_seconds >= MIN_RELIABLE_TRANSFER_SECONDS
+                    else 0
+                )
+
+                if speed > 0 and total_bytes_expected:
+                    bytes_left = max(total_bytes_expected - bytes_downloaded, 0)
+                    eta_seconds = bytes_left / speed
+                    speed_str = (
+                        f"{speed / 1024:.1f} KB/s"
+                        if speed < 1024 * 1024
+                        else f"{speed / (1024 * 1024):.2f} MB/s"
+                    )
+                else:
+                    eta_seconds = float("inf")
+                    speed_str = "calculating..."
 
                 if eta_seconds == float("inf"):
                     eta_str = "calculating..."
@@ -309,79 +330,46 @@ class TmpFilesClient:
                     eta_str = f"{mins}m {secs}s"
 
                 print(f"Downloading part [{idx}/{total_parts}]: {link}")
-                print(f"        ->ETA: {eta_str}")
+                print(f"        ->Speed: {speed_str}  ->ETA: {eta_str}")
 
-                p = self.download(link)
+                p, transfer_seconds = self._download_with_timing(link)
+                part_size = p.stat().st_size
+
                 downloaded_parts.append(p)
-                completed_parts += 1
+                bytes_downloaded += part_size
 
-                print(f"Saved: {p}")
+                if transfer_seconds >= MIN_RELIABLE_TRANSFER_SECONDS:
+                    speed_sample_bytes += part_size
+                    speed_sample_seconds += transfer_seconds
+
+                print(f"Saved: {p} ({part_size:,} bytes, transfer {transfer_seconds:.2f}s)")
 
             except Exception as e:
                 raise TmpFilesError(f"Failed to download part {link}: {e}") from e
 
         # If only one part and we have an internal name, rename to preserve original filename
-        internal_name = manifest.get("internal_name")
-        temp_root = Path(os.environ.get("TEMP", Path.home() / "AppData/Local/Temp"))
-        download_dir = temp_root / "Gnizer" / "downloaded_from_tmpfiles_org"
+        # internal_name = manifest.get("internal_name")
+        # temp_root = Path(os.environ.get("TEMP", Path.home() / "AppData/Local/Temp"))
+        # download_dir = temp_root / "Gnizer" / "downloaded_from_tmpfiles_org"
 
-        if len(downloaded_parts) == 1:
-            single = downloaded_parts[0]
-            if internal_name:
-                assembled = download_dir / internal_name
-                try:
-                    # If the downloaded file already has the correct name, skip rename
-                    if single.resolve() == assembled.resolve():
-                        return [assembled]
+        return_path = downloaded_parts[1]
 
-                    # If assembled exists, overwrite
-                    if assembled.exists():
-                        assembled.unlink()
+        if len(links) > 2:
+            # Reassemble parts into a single file, not including the MD5 hash archive (first part)
+            reassembled_name = manifest.get("internal_name") or "reassembled_file"
+            reassembled_path = downloaded_parts[1].parent / reassembled_name
+            reassembled_parent = reassembled_path.parent
 
-                    single.replace(assembled)
-                    return [assembled]
+            return_path = reassembled_path
 
-                except Exception as e:
-                    raise TmpFilesError(f"Failed to rename downloaded file to internal name: {e}") from e
-
-            return downloaded_parts
+            with reassembled_path.open("wb") as out:
+                for part in downloaded_parts[1:]:  # skip the first part (MD5 hash archive)
+                    with part.open("rb") as p:
+                        out.write(p.read())
 
 
-        # Multiple parts: if we have an internal_name, reassemble by concatenation
-        if internal_name:
-            assembled = download_dir / internal_name
-            try:
-                # Ensure parent exists
-                assembled.parent.mkdir(parents=True, exist_ok=True)
-                # Overwrite if exists
-                if assembled.exists():
-                    assembled.unlink()
-                with assembled.open("wb") as out:
-                    for part in downloaded_parts:
-                        with part.open("rb") as pf:
-                            while True:
-                                chunk = pf.read(1024 * 1024)
-                                if not chunk:
-                                    break
-                                out.write(chunk)
-                # Optionally remove part files
-                if cleanup_parts:
-                    for part in downloaded_parts:
-                        try:
-                            part.unlink(missing_ok=True)
-                        except Exception:
-                            pass
-                return [assembled]
-            except Exception as e:
-                # Attempt cleanup
-                try:
-                    assembled.unlink(missing_ok=True)
-                except Exception:
-                    pass
-                raise TmpFilesError(f"Failed to reassemble parts: {e}") from e
 
-        # No internal name: return the list of downloaded parts (caller must reassemble)
-        return downloaded_parts
+        return Path(links[0]), return_path # return the first part (MD5 hash archive) and the reassembled file path
 
 
     def download(self, url: str) -> Path:
@@ -392,7 +380,48 @@ class TmpFilesClient:
         Returns:
             Path to downloaded file.
         """
-        direct_url = self._ensure_direct_url(url)
+        path, _ = self._download_with_timing(url)
+        return path
+
+    def _download_webpage(self, url: str) -> str:
+        """
+        Downloads a tmpfiles.org webpage (HTML) and returns the text.
+        Raises TmpFilesError on failure.
+        """
+        try:
+            resp = self.session.get(url, timeout=self.timeout)
+            if not resp.ok:
+                raise TmpFilesError(
+                    f"HTTP {resp.status_code} during webpage download\n"
+                    f"{resp.text[:500]}"
+                )
+
+            # It will spit out the HTML and we need `href="https://tmpfiles.org/dl/1786186406.be0342cad24006bf/wjwXF8NMZFsE/example_md5.rar.zip"`
+            matches = re.findall(
+                r'href="(https://tmpfiles\.org/dl/[^"]+)"',
+                resp.text,
+                flags=re.IGNORECASE,
+            )
+
+            if not matches:
+                raise TmpFilesError(
+                    "Could not find a direct tmpfiles.org download URL "
+                    "in the webpage."
+                )
+
+            return matches[0]
+        
+        except requests.RequestException as e:
+            raise TmpFilesError(f"Network error during webpage download: {e}") from e
+
+    def _download_with_timing(self, url: str) -> "tuple[Path, float]":
+        """
+        Same as download(), but also returns how long the response body took to
+        stream in (seconds), measured from after the response headers arrive to
+        the last byte written. That excludes DNS/TCP-connect/TLS-handshake/TTFB,
+        so it reflects real transfer speed rather than one-time connection overhead.
+        """
+        direct_url = self._download_webpage(url=self._ensure_direct_url(url))
 
         temp_root = Path(os.environ.get("TEMP", Path.home() / "AppData/Local/Temp"))
         download_dir = temp_root / "Gnizer" / "downloaded_from_tmpfiles_org"
@@ -407,6 +436,7 @@ class TmpFilesClient:
 
         target_path = download_dir / final_name
 
+        transfer_seconds = 0.0
 
         try:
             with self.session.get(
@@ -420,10 +450,14 @@ class TmpFilesClient:
                         f"{resp.text[:500]}"
                     )
 
+                # Headers have arrived by this point; only the body read below
+                # counts toward the transfer time.
+                transfer_start = time.perf_counter()
                 with target_path.open("wb") as out:
                     for chunk in resp.iter_content(chunk_size=1024 * 1024):
                         if chunk:
                             out.write(chunk)
+                transfer_seconds = time.perf_counter() - transfer_start
 
         except requests.RequestException as e:
             raise TmpFilesError(f"Network error during download: {e}") from e
@@ -431,7 +465,7 @@ class TmpFilesClient:
         if not target_path.exists() or target_path.stat().st_size == 0:
             raise TmpFilesError("Downloaded file is empty or missing.")
 
-        return target_path
+        return target_path, transfer_seconds
 
     # -------------------------
     # HELPERS
@@ -454,7 +488,6 @@ class TmpFilesClient:
         text = raw_text.strip()
 
         # Detect a GNIZER block (loose detection is fine)
-        split_text = text.splitlines()
         header_split_text = text.splitlines()[0].lower()
         shareType_split_text = text.splitlines()[2].lower()
         is_modlist = "modlist" in shareType_split_text
@@ -466,8 +499,11 @@ class TmpFilesClient:
 
         type_of_install = "modlist" if is_modlist else "savefolder"
 
-        # Extract tmpfiles.org urls (preserve order)
-        urls = re.findall(r"https?://(?:www\.)?tmpfiles\.org/[^\s`]+", text, flags=re.IGNORECASE)
+        # Extract tmpfiles.org urls; must decode base64 (preserve order)
+        import base64
+        data_split_text = text.splitlines()[17]
+        data_decoded = base64.b64decode(data_split_text).decode("utf-8")
+        urls = re.findall(r"https?://(?:www\.)?tmpfiles\.org/[^\s`]+", data_decoded, flags=re.IGNORECASE)
 
         if is_modgnizer:
             # Try to extract internal name
@@ -529,8 +565,26 @@ class TmpFilesClient:
         http(s)://tmpfiles.org/12345/file.rar
         → https://tmpfiles.org/dl/12345/file.rar
         """
+
+        # IMPORTANT: 07/08/2026, just found out the scheme changed.
+
+        # https://tmpfiles.org/wtwJF6Cl3t7P/test_md5.rar.zip can no longer translate to https://tmpfiles.org/dl/wtwJF6Cl3t7P/test_md5.rar.zip
+
+        # it gets fitted with an ID upon upload now and does NOT return in the .json response (we have to have a workaround).
+        # https://tmpfiles.org/dl/1786139746.4ca658c92dcedbd6/wtwJF6Cl3t7P/test_md5.rar.zip
+
+        # We need to find a workaround because the chunks keep downloading the html page instead of the actual file.
+
+
         if "/dl/" in url:
             return url.replace("http://", "https://")
+
+        # Follow the redirect to capture the real download URL.
+        # try:
+        #     response = requests.get(url, allow_redirects=True, timeout=10)
+        #     response.json(key="url")  # Ensure it's a tmpfiles.org response
+        # except Exception as exc:
+        #     raise TmpFilesError(f"Failed to resolve tmpfiles.org link: {exc}")        
 
         parsed = urlparse(url)
         if "tmpfiles.org" not in parsed.netloc:

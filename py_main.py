@@ -43,7 +43,7 @@ class App:
 
     @staticmethod
     def is_running_as_exe():
-        return True
+        # return True
         if "__compiled__" in globals():
             return True
         return False
@@ -65,6 +65,9 @@ class App:
         self.debug = False
         self.log = None
         self._cls_skip = 1
+
+        # self.mod_xaero_compat = False 
+        self.mod_xaero_compat = True
         
         # Check for updates and ask user consent
         user_accepted_update = check_for_updates(
@@ -85,8 +88,9 @@ class App:
             "1": ("Load *DATA* from an ARCHIVE (or link)",                  "menu_load_data_from_archive"),
             "2": ("Bundle *MODS* to an ARCHIVE",                            "menu_bundle_mods_to_archive"),
             "3": ("Bundle *WORLD* to an ARCHIVE",                           "menu_bundle_world_to_archive"),
-            "4": (f"Clear temp cache ({self.format_bytes(temp_bytes)})",    "menu_clear_temp_cache"),
-            "5": ("Log errors",                                             "menu_toggle_error_logging"),
+            "4": ("Enable Xaero prompts",                                   "menu_modcompat_xaero"),
+            "5": (f"Clear temp cache & backups ({self.format_bytes(temp_bytes)})",    "menu_clear_temp_cache"),
+            "6": ("Log errors",                                             "menu_toggle_error_logging"),
             "#": ("Quit",                                                   "menu_quit"),
         }
         self.menu_modes = {
@@ -167,6 +171,15 @@ class App:
         new_id = int(version_path.read_text().strip()) + 1
         version_path.write_text(str(new_id), encoding="utf-8")
         return new_id, False
+    
+
+    # -------------------------
+    # region MOD COMPATABILITY
+    # -------------------------
+    def menu_modcompat_xaero(self):
+        self.mod_xaero_compat = not self.mod_xaero_compat
+        self.operation_text = Fore.GREEN + f"Toggled: {self.mod_xaero_compat}"
+        return True
 
     # -------------------------
     # region MENU HANDLERS
@@ -222,7 +235,10 @@ class App:
         # Create output directory
         temp_root = Path(os.environ.get("TEMP", Path.home() / "AppData/Local/Temp"))
         bundled_dir = temp_root / "Gnizer" / "world_bundled"
+        mod_compat_path = temp_root / f"{chosen_world['name']}_mod_compat"
+
         bundled_dir.mkdir(parents=True, exist_ok=True)
+        mod_compat_path.mkdir(parents=True, exist_ok=True)
         
         output_path = bundled_dir / f"{chosen_world['name']}.{archive_prefs['format']}"
         
@@ -234,9 +250,9 @@ class App:
         from py_archive import ArchiveBundler
         bundler = ArchiveBundler(chosen_world["path"])
         format_handlers = {
-            "zip": lambda: bundler.bundle_zip(output_path),
-            "7z": lambda: bundler.bundle_7z(output_path, archive_prefs["password"]),
-            "rar": lambda: bundler.bundle_rar(output_path, archive_prefs["password"]),
+            "zip": lambda: bundler.bundle_zip(output_file=output_path,                                  mod_compat_path=mod_compat_path),
+            "7z": lambda: bundler.bundle_7z(output_file=output_path, password=archive_prefs["password"], mod_compat_path=mod_compat_path),
+            "rar": lambda: bundler.bundle_rar(output_file=output_path, password=archive_prefs["password"], mod_compat_path=mod_compat_path),
         }
         
         try:
@@ -283,7 +299,8 @@ class App:
             return True
 
         kind, value = source
-        archive_path = None
+        primary_archive_path = None
+        hashes_archive_path = None
         manifest = None
 
         self._log(f"KIND -> {kind}", "info")
@@ -304,8 +321,7 @@ class App:
             
             try:
                 client = TmpFilesClient(timeout=120)
-                downloaded = client.download_from_paste(manifest)
-                archive_path = downloaded[0]
+                hashes_archive_path, primary_archive_path = client.download_from_paste(manifest)
             except Exception as e:
                 self._log(e,"critical")
                 http404_code = "HTTP 404" in e.args[0]
@@ -314,17 +330,19 @@ class App:
                 return True
         
         elif kind == "local":
-            archive_path = value
+            assert("unimplemented logic")
+            primary_archive_path = value
 
         # Query user for password
         password = input(Fore.YELLOW + "\nEnter password for archive (leave blank if none): ").strip()
+        print("Loading archive ...")
 
         # Extract archive
         extracted_path = None
         try:
             from py_secure import scan_extraction, auto_scan # // Lazy import 
         
-            extracted_path = ArchiveBundler.extract_archive(archive_path, password=password)
+            extracted_path = ArchiveBundler.extract_archive(primary_archive_path, password=password)
             auto_scan_installation_type = auto_scan(extracted_path)
 
             # This should be reworked, it's a patch to prevent manifest from being NoneType
@@ -374,9 +392,9 @@ This could be a false positive as this scan was made without mods in mind.\n-> D
         
 
         # HANDLE: SAVEFILE   /    MODLIST
-        archive_name = archive_path.name
-        archive_stem = archive_path.stem
-        profile_folder_with_ext = f"{chosen_mod_profile['folder']}{archive_path.suffix}"
+        archive_name = primary_archive_path.name
+        archive_stem = primary_archive_path.stem
+        profile_folder_with_ext = f"{chosen_mod_profile['folder']}{primary_archive_path.suffix}"
         self._log(f"HANDLE -> Type of install {manifest["type_of_install"]}", "info")
 
         match manifest["type_of_install"]:
@@ -420,7 +438,7 @@ This could be a false positive as this scan was made without mods in mind.\n-> D
 
                 # Review world name
                 if not chosen_world_is_fake:
-                    if chosen_world["name"] != archive_path.stem:
+                    if chosen_world["name"] != primary_archive_path.stem:
                         msg = Fore.YELLOW + f"`{archive_name}` doesn't match `{profile_folder_with_ext}`, proceed anyway"
                         if not self.get_consent(msg):
                             return True
@@ -486,25 +504,55 @@ This could be a false positive as this scan was made without mods in mind.\n-> D
         # Create output directory
         temp_root = Path(os.environ.get("TEMP", Path.home() / "AppData/Local/Temp"))
         bundled_dir = temp_root / "Gnizer" / "bundled"
+        bundled_hash_dir = temp_root / "Gnizer" / "bundled_hash_dir"
         bundled_dir.mkdir(parents=True, exist_ok=True)
+        bundled_hash_dir.mkdir(parents=True, exist_ok=True)
         
-        output_path = bundled_dir / f"{chosen_profile['folder']}.{archive_prefs['format']}"
-        
-        if not self.get_consent_delete_file(output_path):
-            return True
+        output_main_archive_path = bundled_dir / f"{chosen_profile['folder']}.{archive_prefs['format']}"
+        output_hash_archive_path = bundled_hash_dir / f"{chosen_profile['folder']}_MD5.{archive_prefs['format']}"
 
-        # Bundle the archive
-        # // Lazy import
-        from py_archive import ArchiveBundler
-        bundler = ArchiveBundler(mod_profile_path)
-        format_handlers = {
-            "zip": lambda: bundler.bundle_zip(output_path),
-            "7z": lambda: bundler.bundle_7z(output_path, archive_prefs["password"]),
-            "rar": lambda: bundler.bundle_rar(output_path, archive_prefs["password"]),
-        }
+        from py_filemanager import FileOperation
+        FileOperation.delete_file(output_main_archive_path, suppress=True) # Deletes any EXISTING archive.
+
+
         
         try:
-            format_handlers[archive_prefs["format"]]()
+            # Bundle the archive
+            # // Lazy import
+            from py_archive import archiveBundler
+
+            # Creates the .zip/.rar/.7zip, and generates hashes in string format
+            bundled_archive_file, hash_strings = archiveBundler.bundle_content(
+                data_directory_path=mod_profile_path,
+                output_target_file=output_main_archive_path,
+                password=archive_prefs["password"],
+                format=archive_prefs["format"]
+            )
+
+            # Creates the hash file for the string to be applied into
+            hash_file_name = f"{bundled_archive_file.name}.md5.txt"
+            hash_file = Path(bundled_hash_dir) / hash_file_name
+
+            # Tidy bundled_hash_dir before using
+            FileOperation.delete_directory_contents(bundled_hash_dir)
+
+            # Write the hash file
+            with open(hash_file, "w", encoding="utf-8") as f:
+                for rel_path, md5 in hash_strings.items():
+                    f.write(f"{md5}  {rel_path}\n")
+                    # 10MB of random junk data
+                    f.write(os.urandom(1024).hex() + "\n")
+
+            # Bundle the directory containing the hash file
+            bundled_hash_file, _ = archiveBundler.bundle_content(
+                data_directory_path=bundled_hash_dir,
+                output_target_file=output_hash_archive_path,
+                password=archive_prefs["password"],
+                format=archive_prefs["format"],
+                skip_hash_generation=True
+            )
+
+
         except FileNotFoundError as e:
             self._log(e,"critical")
             self.operation_text = Fore.RED + f"Required tool not found: {e}"
@@ -522,11 +570,11 @@ This could be a false positive as this scan was made without mods in mind.\n-> D
                 self.operation_text = Fore.RED + f"Unexpected error: {e}"
             return True
 
-        print(Fore.BLUE + f"Archive created at: {output_path}")
+        print(Fore.BLUE + f"Archive created at: {output_main_archive_path}")
         
         # Ask about upload
         try:
-            self.get_consent_upload_to_fileio(output_path, "modlist")
+            self.get_consent_upload_to_fileio(main_archive_path=output_main_archive_path, hash_archive_path=bundled_hash_file, type_of_upload="modlist")
         except Exception as e:
             self._log(e,"critical")
             self.operation_text = Fore.RED + f"Upload step failed: {e}"
@@ -604,26 +652,43 @@ This could be a false positive as this scan was made without mods in mind.\n-> D
         
         choice = self.query_numeric_input(len(worlds))
         return None if choice is None else worlds[choice - 1]
+    
+    def get_xaero_waypoints(self, profile, world):
+        self._log("GET -> get_xaero_waypoints_of_profile", "info")
+
+        # // Lazy
+        from py_undbj import UnDBJ
+        undbj = UnDBJ(profile)
+        waypoints = undbj.get_internal_profile_waypoints()
+
+        print("\n" + self.DIVIDER)
+        print(Fore.CYAN + "\n" + "[XAERO]\nPlease select your corresponding waypoint list to **COPY**.")
+
+        for i, p in enumerate(waypoints, 1):
+            print(Fore.LIGHTBLACK_EX + ">" + f"[{i}]. {p["name"]}")
+
+        choice = self.query_numeric_input(len(waypoints))
+        return None if choice is None else waypoints[choice - 1]
 
     def get_archive_preferences(self):
         self._log("GET -> get_archive_preferences", "info")
 
         # // Lazy import
-        from py_archive import ArchiveBundler
-        bundler = ArchiveBundler(Path("."))
+        from py_archive import archiveBundler
         available = {"1": "zip"}
         
         # Loop until user provides a valid selection or cancels
         while True:
             print(Style.BRIGHT + "\n-x-x- { Choose **ARCHIVE** Format } -x-x-\n")
-            print(Fore.LIGHTBLACK_EX + "[1]. ZIP")
+            print(Fore.LIGHTBLACK_EX + "Note: Some options may need to be installed separately.\n")
+            print(Fore.LIGHTBLACK_EX + "[1]. ZIP                                    / Windows Built-in")
+            print(Fore.LIGHTBLACK_EX + "[2]. 7Z  (password supported)               / https://www.7-zip.org/download.html")
+            print(Fore.LIGHTBLACK_EX + "[3]. RAR (password supported) + recommended / https://www.win-rar.com/download.html")
             
-            if bundler.has_7z():
-                print(Fore.LIGHTBLACK_EX + "[2]. 7Z (password supported)")
+            if archiveBundler.has_7z():
                 available["2"] = "7z"
             
-            if bundler.has_winrar():
-                print(Fore.LIGHTBLACK_EX + "[3]. RAR (password supported) + recommended")
+            if archiveBundler.has_winrar():
                 available["3"] = "rar"
             
             choice = input(Fore.WHITE + "> ").strip()
@@ -632,7 +697,7 @@ This could be a false positive as this scan was made without mods in mind.\n-> D
                 return None
 
             if choice not in available:
-                print(Fore.RED + "Invalid number for archive selection. Enter a valid number or 'c' to cancel.")
+                print(Fore.RED + "Impossible operation. Enter a different number or 'c' to cancel.")
                 continue
             
             fmt = available[choice]
@@ -659,7 +724,7 @@ This could be a false positive as this scan was made without mods in mind.\n-> D
         while True:
             print(Style.BRIGHT + "\n-x-x- { Load *DATA* From? } -x-x-\n")
             print(Fore.LIGHTBLACK_EX + "[1]. Read from clipboard (Gnizer shared text)")
-            print(Fore.LIGHTBLACK_EX + "[2]. Local archive file")
+            print(Fore.LIGHTBLACK_EX + "[2]. Local archive file (neglected therefore unavailable)")
             print(Fore.LIGHTBLACK_EX + "\n or 'c' to cancel and return to the previous menu. ^\n")
             
             choice = input(Fore.WHITE + "> ").strip().lower()
@@ -677,17 +742,17 @@ This could be a false positive as this scan was made without mods in mind.\n-> D
                 if not text:
                     self.operation_text = Fore.RED + "Clipboard is empty or does not contain text."
                     # allow retry instead of returning to main menu
-                    print(Fore.LIGHTBLACK_EX + "Clipboard empty or invalid. Try again or press 'c' to cancel.")
+                    print(Fore.RED + "Clipboard empty or invalid. Try again or press 'c' to cancel.")
                     continue
                 
-                if "# Gnizer" not in text or "## Download Links" not in text:
+                if "### Gnizer" not in text or "**Data**" not in text:
                     self.operation_text = Fore.RED + "Clipboard content is not a valid Gnizer share."
-                    print(Fore.LIGHTBLACK_EX + "Clipboard content invalid. Try again or press 'c' to cancel.")
+                    print(Fore.RED + "Clipboard content invalid. Try again or press 'c' to cancel.")
                     continue
                 
                 return ("clipboard", text)
             
-            elif choice == "2":
+            elif choice == "2force":
                 try:
                     # // Lazy imports
                     from PyQt5.QtWidgets import QApplication, QFileDialog 
@@ -700,14 +765,14 @@ This could be a false positive as this scan was made without mods in mind.\n-> D
                     
                     if not file_path:
                         self.operation_text = Fore.RED + "No file selected."
-                        print(Fore.LIGHTBLACK_EX + "No file selected. Try again or press 'c' to cancel.")
+                        print(Fore.RED + "No file selected. Try again or press 'c' to cancel.")
                         continue
                     
                     return ("local", Path(file_path))
                 except Exception as e:
                     self._log(e,"critical")
                     self.operation_text = Fore.RED + f"Failed to open file dialog: {e}"
-                    print(Fore.LIGHTBLACK_EX + "File dialog failed. Try again or press 'c' to cancel.")
+                    print(Fore.RED + "File dialog failed. Try again or press 'c' to cancel.")
                     continue
             
             print(Fore.RED + "Invalid selection for archive source. Enter 1, 2, or 'c' to cancel.")
@@ -752,7 +817,7 @@ This could be a false positive as this scan was made without mods in mind.\n-> D
             
             try:
                 # // Lazy import
-                import send2trash
+                # import send2trash
                 send2trash.send2trash(str(file_path))
                 print(Fore.BLUE + "Existing file moved to Recycle Bin.")
                 return True
@@ -761,44 +826,49 @@ This could be a false positive as this scan was made without mods in mind.\n-> D
                 self.operation_text = Fore.RED + f"Failed to delete file: {e}"
                 return False
 
-    def get_consent_upload_to_fileio(self, archive_path: Path, type_of_upload: str):
+    def get_consent_upload_to_fileio(self, main_archive_path: Path, hash_archive_path: Path, type_of_upload: str):
         self._log("GET (CONSENT) -> get_consent_upload_to_fileio", "info")
 
         if not type_of_upload:
-            self.operation_text = Fore.RED + "(internal error) type_of_upload was not declared, is it a modlist or savefolder?"
+            self.operation_text = Fore.RED + "(internal error) type_of_upload was not declared; is it a modlist or savefolder?"
 
-        if not archive_path.exists() or not archive_path.is_file():
+        if not main_archive_path.exists() or not main_archive_path.is_file():
             self.operation_text = Fore.RED + "Archive not found for upload."
             return
         
         print("\n" + Fore.YELLOW + "--> Note: tmpfiles.org automatically deletes uploads after 60 minutes. <-- ")
-        print(Fore.RED + "--> [!] if your zip is NOT password protected, be careful that others could download! <--  [!] [!]")
+        print(Fore.RED + "--> [!] if your zip is NOT password protected, others could download! <--  [!] [!]")
         
-        if not self.get_consent("Upload this archive to tmpfiles.org to share with friends"):
+        due_uploaded_file_strings = f"● {main_archive_path.name}\n● {hash_archive_path.name}"
+        if not self.get_consent(f"Files due to upload:\n{due_uploaded_file_strings}\n Would you like to send these to tmpfiles.org to share with friends"):
             print(Fore.WHITE + "Skipping upload.")
-            self.reveal_in_explorer(archive_path)
+            self.reveal_in_explorer(main_archive_path)
             self.operation_text = "Archive bundled locally (upload skipped)"
             return
+
         
         # // Lazy import
         from py_tmpfiles import TmpFilesClient, TmpFilesError
         client = TmpFilesClient(timeout=120)
         try:
             print(Fore.BLUE + "Uploading to tmpfiles.org ...")
-            result = client.upload_in_chunks(archive_path, chunk_size=90 * 1024 * 1024)
-            links = result.get("links", [])
+            result_secondary = client.upload_in_chunks(hash_archive_path, chunk_size=90 * 1024 * 1024)
+            result_main = client.upload_in_chunks(main_archive_path, chunk_size=90 * 1024 * 1024)
+            
+            # Reference to hash archive download will be topmost
+            links = result_secondary.get("links", []) + result_main.get("links", [])
             
             if not links:
                 raise Exception("Upload completed but no links returned.")
             
-            if len(links) == 1:
-                self.save_links_md_and_copy_to_clipboard([links[0]], archive_path, type_of_upload)
+            if len(links) <= 2:
+                self.save_links_md_and_copy_to_clipboard(links, main_archive_path, type_of_upload)
                 print(Fore.GREEN + "Upload successful!")
                 print(Fore.WHITE + "A Gnizer share block has been copied to your clipboard.")
             else:
                 print(Fore.GREEN + "Chunked upload successful!")
                 print(Fore.WHITE + f"Parts uploaded: {len(links)}")
-                self.save_links_md_and_copy_to_clipboard(links, archive_path, type_of_upload)
+                self.save_links_md_and_copy_to_clipboard(links, main_archive_path, type_of_upload)
                 print(Fore.LIGHTBLACK_EX + "\nTip: Send the copied text to your friend.")
                 print(Fore.LIGHTBLACK_EX + "They can paste it directly into Gnizer.")
         except TmpFilesError as e:
@@ -881,13 +951,13 @@ This could be a false positive as this scan was made without mods in mind.\n-> D
             }
         
         # Handle CurseForge/Overwolf duplicates
-        if (mod_managers.get("CurseForge", {}).get("installed") and 
-            mod_managers.get("CurseForge (Overwolf)", {}).get("installed")):
-            mod_managers.pop("CurseForge (Overwolf)", None)
-            mod_managers["CurseForge"]["profiles_path"] = Path(os.path.expandvars(
-                self.PATH_MAP["CurseForge (Overwolf)"]["profiles"]))
-        else:
-            mod_managers.pop("CurseForge", None)
+        # if (mod_managers.get("CurseForge", {}).get("installed") and 
+        #     mod_managers.get("CurseForge (Overwolf)", {}).get("installed")):
+        #     mod_managers.pop("CurseForge (Overwolf)", None)
+        #     mod_managers["CurseForge"]["profiles_path"] = Path(os.path.expandvars(
+        #         self.PATH_MAP["CurseForge (Overwolf)"]["profiles"]))
+        # else:
+        #     mod_managers.pop("CurseForge", None)
         
         return {k: v for k, v in mod_managers.items() if v["installed"]}
 
@@ -910,31 +980,35 @@ This could be a false positive as this scan was made without mods in mind.\n-> D
         size_bytes = original_file.stat().st_size if original_file.exists() else 0
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         short_ts = datetime.now().strftime("%Y%m%d%H%M%S")
+
+        # <t:1786127820:R> e.g.
+        discord_relative_time = f"<t:{int(datetime.now().timestamp())}:R>"
+
+        # Convert links to base64
+        import base64
+        links_merged = "\n".join(links)
+        links_b64 = [base64.b64encode(links_merged.encode()).decode().strip()]
         
-        md_content = f"""```# Gnizer (v{self.build_id})
+        md_content = f"""### Gnizer (v{self.build_id}) `{internal_name}`
 
-A friend has shared their {type_of_upload} with you!
-
-*Internal name: \"{internal_name}\"  
+A friend has shared their {type_of_upload} with you {discord_relative_time}!
+```
+Internal name: \"{internal_name}\"  
 Size of {type_of_upload}: {size_bytes} bytes  
 Date of {type_of_upload}: {timestamp}*
 
 **Instructions**
-- Highlight *this entire text*
-    - CTRL + C
+- CTRL+C this!
 - Open Gnizer
-    - Select: 'Load *DATA* from an ARCHIVE'
-    - Select: 'Read from clipboard'
-    - [DO NOT PASTE]
-    - Press Enter
+- Select: 'Load *DATA* from an ARCHIVE'
+- Select: 'Read from clipboard'
+- [DON'T EVER: CTRL+V]
+- Press Enter
 
-- Gnizer will automatically do the hard work :3
-
-{self.DIVIDER}
-
-## Download Links
+**Data**
 """
-        md_content += "\n".join(links) + "\n```"
+
+        md_content += "\n".join(links_b64) + "\n```"
         
         # Save markdown file
         md_filename = f"Gnizer_shared_modlist_{short_ts}.md"
@@ -988,11 +1062,11 @@ Date of {type_of_upload}: {timestamp}*
         try:
             import shutil # // Lazy import
             shutil.rmtree(temp_dir)
-            self.operation_text = "Temp cache cleared successfully."
+            self.operation_text = "Temp cache & backups cleared successfully."
             return True
         except Exception as e:
             self._log(e,"critical")
-            self.operation_text = f"Failed to clear temp cache: {e}"
+            self.operation_text = f"Failed to clear temp: {e}"
             return False
 
     def format_bytes(self, size: int):
