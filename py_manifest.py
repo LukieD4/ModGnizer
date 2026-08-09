@@ -6,9 +6,11 @@ number -- ``text.splitlines()[17]`` for the payload and ``[2]`` for the share
 type. Adding a single line to the template would have silently broken every
 share, in a different file, with no error until a friend pasted one in.
 
-The wire format is unchanged, so blocks produced by older builds still parse.
 Parsing is now structural: it looks for the ``**Data**`` marker rather than
-counting lines. Run this module directly to check the round-trip.
+counting lines, so blocks from older builds still parse even though the
+template has since gained an expiry line -- exactly the change that would
+have broken the old line-indexed parser. Run this module directly to check
+the round-trip and the tamper refusals.
 """
 
 from __future__ import annotations
@@ -57,12 +59,16 @@ class ManifestError(ValueError):
 # region RENDER
 # -------------------------
 def render(links: list[str], *, build_id: int, internal_name: str,
-           size_bytes: int, install_type: str,
+           size_bytes: int, install_type: str, expiry_seconds: int,
            now: datetime | None = None) -> str:
     """Build the block the user copies to a friend.
 
     ``links[0]`` must be the MD5 hash archive; the loader relies on that
     ordering to know which downloaded part is the payload.
+
+    Both timestamps use Discord's ``<t:epoch:R>`` form so they render as
+    "an hour ago" / "in an hour" in chat. They sit *outside* the code fence
+    deliberately -- Discord does not expand timestamps inside one.
     """
     if not links:
         raise ManifestError("Cannot render a share with no links.")
@@ -70,12 +76,14 @@ def render(links: list[str], *, build_id: int, internal_name: str,
     now = now or datetime.now()
     timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
     discord_relative = f"<t:{int(now.timestamp())}:R>"
+    expires_relative = f"<t:{int(now.timestamp()) + expiry_seconds}:R>"
 
     payload = base64.b64encode("\n".join(links).encode()).decode().strip()
 
     return f"""### Gnizer (v{build_id}) `{internal_name}`
 
 A friend has shared their {install_type} with you {discord_relative}!
+These links expire {expires_relative}, so grab them before then.
 {FENCE}
 Internal name: \"{internal_name}\"
 Size of {install_type}: {size_bytes} bytes
@@ -255,6 +263,7 @@ if __name__ == "__main__":
             internal_name="pack.rar",
             size_bytes=123456,
             install_type=kind,
+            expiry_seconds=3600,
         )
         parsed = parse(block)
 

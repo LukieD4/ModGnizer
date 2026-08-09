@@ -210,12 +210,17 @@ def _print_link_order(links: list[str]) -> None:
 def _publish_share_block(ctx: Context, links: list[str], main_archive: Path,
                          install_type: str) -> Result:
     """Render the share block, save it, copy it, and show it to the user."""
+    # // Lazy import -- the expiry we actually sent, so the block can never
+    # promise the recipient a window different from the one we requested.
+    from py_tmpfiles import EXPIRY_SECONDS
+
     block = py_manifest.render(
         links,
         build_id=ctx.build_id,
         internal_name=main_archive.name,
         size_bytes=main_archive.stat().st_size if main_archive.exists() else 0,
         install_type=install_type,
+        expiry_seconds=EXPIRY_SECONDS,
     )
 
     md_path = py_paths.ensure(py_paths.gnizer_temp()) / py_manifest.suggested_filename()
@@ -254,7 +259,17 @@ def load_data(ctx: Context) -> Result:
 
     try:
         client = TmpFilesClient(timeout=120)
-        _hash_archive, payload_archive = client.download_manifest(manifest)
+
+        # Resolve every part first. Cheap (HTML pages), and it means an
+        # expired or reordered share fails in seconds instead of after
+        # several hundred megabytes.
+        metas = client.preflight(manifest)
+
+        order = _check_upload_order(ctx, metas)
+        if order is not None:
+            return order
+
+        _hash_archive, payload_archive = client.download_manifest(manifest, metas)
     except TmpFilesError as exc:
         ctx.log.exception(exc)
         if "HTTP 404" in str(exc):
@@ -289,6 +304,46 @@ def load_data(ctx: Context) -> Result:
         return _install_savefolder(profile, payload_archive, extracted_path, py_report)
 
     return _install_modlist(profile, payload_archive, extracted_path, py_report)
+
+
+def _check_upload_order(ctx: Context, metas) -> Result | None:
+    """Confirm the parts were uploaded in the order the share lists them.
+
+    Gnizer always uploads MD5 first, then payload part 0, 1, ... so each part
+    must be younger than the one before it. A part that turns out to be OLDER
+    was staged ahead of time and swapped in.
+
+    Returns a Result to abort, or None to carry on.
+    """
+    verdict = py_secure.check_upload_order(
+        [(meta.label, meta.expiry_instant) for meta in metas]
+    )
+    ctx.log.info(f"UPLOAD ORDER -> {verdict.summary()}")
+
+    if verdict.ok:
+        if verdict.unknown:
+            # Never silently skip: if tmpfiles changes its page, the check
+            # stops working, and the user should be told rather than being
+            # left believing it ran.
+            py_ui.note(f"[!] {verdict.summary()}")
+        else:
+            py_ui.note(f"[ok] {verdict.summary()}")
+        return None
+
+    print("\n" + py_ui.DIVIDER)
+    py_ui.error("The parts of this share were not uploaded in the expected order:")
+    for problem in verdict.problems:
+        py_ui.error(f"  - {problem}")
+    py_ui.warn(
+        "\nGnizer always uploads the hash list first, then each payload part in\n"
+        "sequence, so this should be impossible for a share made normally.\n"
+        "It can mean a link was replaced with a file prepared in advance."
+    )
+
+    if not py_ui.ask_consent(Fore.RED + "-> Do you still want to download this"):
+        return Result.error("Aborted: share parts are out of upload order.")
+
+    return None
 
 
 def _verify_contents(extracted_path: Path, declared_type: str) -> Result | None:

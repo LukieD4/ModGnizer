@@ -211,7 +211,11 @@ def confirm_overwrite(file_path: Path) -> bool:
 
 
 def confirm_upload(archive_names: list[str]) -> bool:
-    py_ui.warn("\n--> Note: tmpfiles.org automatically deletes uploads after 60 minutes. <--")
+    # // Lazy import -- keeps requests out of the startup path
+    from py_tmpfiles import EXPIRY_SECONDS
+
+    py_ui.warn(f"\n--> Note: uploads are set to self-delete after "
+               f"{EXPIRY_SECONDS // 60} minutes. <--")
     py_ui.error("--> [!] if your archive is NOT password protected, others could download! <--")
 
     listed = "\n".join(f"● {name}" for name in archive_names)

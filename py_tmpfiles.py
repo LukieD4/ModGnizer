@@ -10,14 +10,18 @@ bytes. Two fixes worth naming:
 
 Note on the upload site: as of 07/08/2026 tmpfiles.org no longer lets you build
 the /dl/ URL by string substitution -- an ID is injected at upload time and is
-absent from the JSON response. ``_resolve_direct_url`` scrapes the share page
-for the real link, which is why every download costs two requests.
+absent from the JSON response. ``_scrape_page`` reads the real link off the
+share page, which is why every download costs two requests. That same page
+also carries "File expires in N minutes", so ``preflight`` collects both in
+one pass -- the upload-order check in py_secure is free of extra traffic.
 """
 
 from __future__ import annotations
 
 import itertools
+import re
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, List
@@ -28,6 +32,22 @@ import requests
 import py_paths
 from py_ui import format_bytes
 
+# Per https://tmpfiles.org/api the upload endpoint accepts:
+#   file    (required) File to upload, max 100 MB
+#   expire  (optional) Seconds until deletion (60-172800), default 3600
+#
+# 3600 is already the server default, but we send it explicitly on every
+# upload. Relying on a remote default means someone else's config change
+# silently decides how long a user's archive sits on a public host -- and the
+# 60-minute figure is promised to the user in the upload warning and in the
+# share block, so it needs to be ours to keep.
+EXPIRY_SECONDS = 60 * 60
+EXPIRY_MIN_SECONDS = 60
+EXPIRY_MAX_SECONDS = 172800
+
+# Hard server-side cap on a single upload. DEFAULT_CHUNK_SIZE must stay below
+# it, otherwise every split part is rejected with an opaque HTTP error.
+MAX_UPLOAD_BYTES = 100 * 1024 * 1024
 DEFAULT_CHUNK_SIZE = 90 * 1024 * 1024
 
 # A transfer only counts toward the speed estimate once it lasted this long.
@@ -38,6 +58,67 @@ MIN_RELIABLE_TRANSFER_SECONDS = 0.025
 
 class TmpFilesError(Exception):
     """Raised for tmpfiles.org upload/download errors."""
+
+
+@dataclass(frozen=True)
+class PartMeta:
+    """What the share page told us about one part, before downloading it."""
+
+    label: str
+    link: str
+    direct_url: str
+    remaining_seconds: int | None
+    expiry_instant: float | None
+
+
+# Observed live: <p class="file-meta">File expires in 51 minutes</p>
+# Tolerant on purpose -- units and wording may vary ("1 hour", "30 seconds"),
+# and an unparseable page must degrade to "unknown", never to a hard failure.
+_FILE_META_RE = re.compile(r"<p[^>]*file-meta[^>]*>(.*?)</p>", re.IGNORECASE | re.DOTALL)
+_EXPIRES_RE = re.compile(r"expires?\s+in\s+([^<]*)", re.IGNORECASE)
+_DURATION_RE = re.compile(
+    r"(\d+)\s*(hours?|hrs?|minutes?|mins?|seconds?|secs?)", re.IGNORECASE
+)
+_UNIT_SECONDS = {"h": 3600, "m": 60, "s": 1}
+
+
+def _parse_remaining_seconds(html: str) -> int | None:
+    """Seconds until deletion, read off the share page. None if unreadable."""
+    meta = _FILE_META_RE.search(html)
+    haystack = meta.group(1) if meta else html
+
+    expires = _EXPIRES_RE.search(haystack)
+    if not expires:
+        return None
+
+    total = 0
+    found = False
+    for amount, unit in _DURATION_RE.findall(expires.group(1)):
+        total += int(amount) * _UNIT_SECONDS[unit[0].lower()]
+        found = True
+
+    return total if found else None
+
+
+def _expiry_seconds() -> int:
+    """The expiry we send, checked against the API's accepted range.
+
+    A plain ``assert`` would be useless here: the release build compiles with
+    --python-flag=no_asserts, so it would be stripped out of the EXE.
+    """
+    if not EXPIRY_MIN_SECONDS <= EXPIRY_SECONDS <= EXPIRY_MAX_SECONDS:
+        raise TmpFilesError(
+            f"EXPIRY_SECONDS is set to {EXPIRY_SECONDS}, outside the range "
+            f"tmpfiles.org accepts ({EXPIRY_MIN_SECONDS}-{EXPIRY_MAX_SECONDS})."
+        )
+    return EXPIRY_SECONDS
+
+
+if DEFAULT_CHUNK_SIZE > MAX_UPLOAD_BYTES:
+    raise TmpFilesError(
+        f"DEFAULT_CHUNK_SIZE ({DEFAULT_CHUNK_SIZE}) exceeds the per-file "
+        f"upload limit ({MAX_UPLOAD_BYTES}); every split part would be rejected."
+    )
 
 
 class TmpFilesClient:
@@ -55,16 +136,27 @@ class TmpFilesClient:
     # region UPLOAD
     # -------------------------
     def upload(self, file_path: Path) -> str:
-        """Upload one file, return its share URL."""
+        """Upload one file with a 60-minute expiry, return its share URL."""
         file_path = Path(file_path)
         if not file_path.is_file():
             raise TmpFilesError(f"File not found: {file_path}")
+
+        size = file_path.stat().st_size
+        if size > MAX_UPLOAD_BYTES:
+            # Caught here rather than letting the server reject it, so the
+            # message names the real cause instead of an HTTP status.
+            raise TmpFilesError(
+                f"{file_path.name} is {format_bytes(size)}, over the "
+                f"{format_bytes(MAX_UPLOAD_BYTES)} per-file limit. "
+                "It should have been split into parts first."
+            )
 
         try:
             with file_path.open("rb") as fh:
                 resp = self.session.post(
                     self.UPLOAD_URL,
                     files={"file": (self._masked_name(file_path), fh)},
+                    data={"expire": str(_expiry_seconds())},
                     timeout=self.timeout,
                 )
         except requests.RequestException as exc:
@@ -142,11 +234,15 @@ class TmpFilesClient:
     # -------------------------
     # region DOWNLOAD
     # -------------------------
-    def download_manifest(self, manifest) -> tuple[Path, Path]:
+    def download_manifest(self, manifest,
+                          metas: list[PartMeta] | None = None) -> tuple[Path, Path]:
         """Download every part of a ShareManifest.
 
         Returns ``(hash_archive_path, payload_path)``. The payload is
         reassembled from parts 1..n when the share was chunked.
+
+        Pass the ``metas`` from ``preflight()`` to reuse the already-resolved
+        download URLs; otherwise this resolves them itself.
         """
         links = list(manifest.links)
         if len(links) < 2:
@@ -154,6 +250,9 @@ class TmpFilesClient:
                 "This share is incomplete -- it should contain a hash archive "
                 "and at least one data part."
             )
+
+        if metas is None:
+            metas = self.preflight(manifest)
 
         total_parts = len(links)
         expected_bytes = manifest.size_bytes
@@ -163,7 +262,7 @@ class TmpFilesClient:
 
         parts: list[Path] = []
 
-        for index, link in enumerate(links, start=1):
+        for index, meta in enumerate(metas, start=1):
             # Speed is measured only from the body-transfer phase of parts
             # already finished, so DNS/TLS/TTFB don't drag the estimate down.
             speed = (
@@ -175,16 +274,18 @@ class TmpFilesClient:
                 max(expected_bytes - downloaded_bytes, 0) if expected_bytes else 0
             )
 
-            print(f"Downloading part [{index}/{total_parts}]: {link}")
+            print(f"Downloading part [{index}/{total_parts}]: {meta.link}")
             print(f"        ->Speed: {_format_speed(speed)}"
                   f"  ->ETA: {_format_eta(remaining, speed) if expected_bytes else 'calculating...'}")
 
             try:
-                part, transfer_seconds = self._download(link)
+                part, transfer_seconds = self._download(meta.direct_url)
             except TmpFilesError:
                 raise
             except Exception as exc:
-                raise TmpFilesError(f"Failed to download part {link}: {exc}") from exc
+                raise TmpFilesError(
+                    f"Failed to download part {meta.link}: {exc}"
+                ) from exc
 
             part_size = part.stat().st_size
             parts.append(part)
@@ -216,10 +317,11 @@ class TmpFilesClient:
 
         return target
 
-    def _download(self, url: str) -> tuple[Path, float]:
-        """Fetch one part. Returns its path and the body-transfer duration."""
-        direct_url = self._resolve_direct_url(self._ensure_dl_path(url))
+    def _download(self, direct_url: str) -> tuple[Path, float]:
+        """Fetch one part from an already-resolved /dl/ URL.
 
+        Returns its path and the body-transfer duration.
+        """
         download_dir = py_paths.ensure(py_paths.downloads_dir())
 
         filename = Path(urlparse(direct_url).path).name
@@ -251,8 +353,48 @@ class TmpFilesClient:
 
         return target, transfer_seconds
 
-    def _resolve_direct_url(self, url: str) -> str:
-        """Scrape the share page for the real /dl/ link (see module docstring)."""
+    # -------------------------
+    # region PRE-FLIGHT
+    # -------------------------
+    def preflight(self, manifest) -> list["PartMeta"]:
+        """Resolve every part's download URL and expiry before downloading.
+
+        Costs nothing extra: the share page we already have to fetch in order
+        to find the /dl/ link is the same page that carries the expiry. Doing
+        it up front means an expired or reordered share is caught in seconds
+        rather than after several hundred megabytes have come down the wire.
+        """
+        metas: list[PartMeta] = []
+        total = len(manifest.links)
+
+        for index, link in enumerate(manifest.links):
+            print(f"Checking part [{index + 1}/{total}] ...")
+            direct_url, remaining = self._scrape_page(self._ensure_dl_path(link))
+
+            metas.append(
+                PartMeta(
+                    label="MD5 hashes" if index == 0 else f"payload part {index}",
+                    link=link,
+                    direct_url=direct_url,
+                    remaining_seconds=remaining,
+                    # Absolute instant, so the delay between these sequential
+                    # page reads cannot masquerade as an ordering problem.
+                    expiry_instant=(
+                        time.monotonic() + remaining if remaining is not None else None
+                    ),
+                )
+            )
+
+        return metas
+
+    def _scrape_page(self, url: str) -> tuple[str, int | None]:
+        """Return the real /dl/ link and the remaining lifetime, in seconds.
+
+        The /dl/ URL cannot be built by string substitution any more (see the
+        module docstring), so it has to be read off the page. Expiry is read
+        from the same response; it is best-effort, and a None simply means the
+        upload-order check skips this part rather than blocking the download.
+        """
         import re  # // Lazy import
 
         try:
@@ -273,7 +415,7 @@ class TmpFilesClient:
                 "Could not find a direct tmpfiles.org download URL on the page."
             )
 
-        return matches[0]
+        return matches[0], _parse_remaining_seconds(resp.text)
 
     # -------------------------
     # region HELPERS
