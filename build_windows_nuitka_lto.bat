@@ -109,11 +109,19 @@ REM NUITKA BUILD
 REM ==================================================
 echo [INFO] Building %VERSIONED_EXE%...
 
+REM Clipboard access moved from PyQt5 to pyperclip, so --enable-plugin=pyqt5
+REM is gone. PyQt5 may still be sitting in the venv, so --nofollow-import-to
+REM keeps a stray import from silently dragging Qt back into the EXE.
+REM
+REM Every module is listed explicitly below: most are reached only through
+REM lazy imports inside functions, so an omission surfaces as a runtime crash
+REM in the shipped EXE rather than a build error. The old list covered 4 of 9.
+
 "%VENV_PY%" -m nuitka ^
  --onefile ^
  --lto=yes ^
  --jobs=4 ^
- --enable-plugin=pyqt5 ^
+ --nofollow-import-to=PyQt5 ^
  --assume-yes-for-downloads ^
  --output-dir="%DISTDIR%" ^
  --output-filename="%VERSIONED_EXE%" ^
@@ -122,9 +130,22 @@ echo [INFO] Building %VERSIONED_EXE%...
  --windows-file-version=1.0.0.%BUILDVER% ^
  --windows-product-version=1.0.0.%BUILDVER% ^
  --include-module=py_main ^
+ --include-module=py_actions ^
  --include-module=py_archive ^
+ --include-module=py_gamelog ^
+ --include-module=py_getters ^
  --include-module=py_imports ^
+ --include-module=py_log ^
+ --include-module=py_managers ^
+ --include-module=py_manifest ^
+ --include-module=py_models ^
+ --include-module=py_paths ^
+ --include-module=py_report ^
+ --include-module=py_secure ^
+ --include-module=py_tmpfiles ^
+ --include-module=py_ui ^
  --include-module=py_undbj ^
+ --include-module=py_updater ^
  --include-data-file=buildId.version=buildId.version ^
  --python-flag=no_site ^
  --python-flag=no_warnings ^

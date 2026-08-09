@@ -1,373 +1,328 @@
-import sqlite3, json, os
+"""Reading profiles and worlds out of Modrinth and CurseForge.
+
+Was a class whose ``__init__`` did ``try: Path(data) except: self.data = data``,
+so an instance ended up with *either* ``source_path`` *or* ``data`` depending
+on what you passed, and only one method understood the second shape. These are
+plain functions now -- each one says what it takes.
+"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
 from datetime import datetime
 from pathlib import Path
-from py_imports import *
 
-class UnDBJ:
-    def __init__(self, data):
-        try:
-            self.source_path = Path(data)
-        except:
-            self.data = data
+import py_gamelog
+import py_managers
+from py_models import ModManager, Profile, World
 
-    # -------------------------
-    # PUBLIC API
-    # -------------------------
+NEW_WORLD_LABEL = "➕  Create a New World!"
 
-    def get_internal_profiles(self):
-        """
-        Returns a list of unified profile objects:
-        {
-            "path": Path(...),
-            "folder": "...",
-            "name": "...",
-            "game_version": "...",
-            "mod_loader": "...",
-            "last_played": "...",
-            "display": "...",
-        }
-        """
 
-        if self.source_path.is_file() and self.source_path.suffix == ".db":
-            profiles = self._get_modrinth_profiles()
-            return self._format_profiles(profiles)
-        
-        if not self.source_path.is_file():
-            profiles = self._get_curseforge_profiles()
-            return self._format_profiles(profiles)
-
-        print(f"Unsupported profile source: {self.source_path}")
+# -------------------------
+# region PUBLIC API
+# -------------------------
+def read_profiles(manager: ModManager) -> list[Profile]:
+    """Every usable profile in a mod manager, ready to display."""
+    if manager.db_path.is_file() and manager.db_path.suffix == ".db":
+        profiles = _read_modrinth_profiles(manager)
+    elif manager.profiles_path.is_dir():
+        profiles = _read_curseforge_profiles(manager)
+    else:
         return []
-    
-    def get_internal_worlds(self, add_world:bool=None):
-        worlds = []
 
-        try:
-            base = Path(self.source_path / "saves")
-            if not base.exists() or not base.is_dir():
-                return worlds
-
-            sorted_base_dirs = sorted(base.iterdir())
-            last_index = len(sorted_base_dirs) - 1
-
-            # This is made this way to patch the bug which happens when the user has no worlds, crashing the app.
-            def add_fake_world(inst=None):
-                # Overwrite inst with a fake path
-                time = int(datetime.now().timestamp())
-                inst = inst.parent / f"➕  Create a New World!"
-
-                return {
-                    "path": inst,
-                    "name": inst.name,
-                    "last_played": None,
-                    "fake_world": True
-                }
+    return _format_profiles(profiles)
 
 
-            if len(sorted_base_dirs) > 0:
-                for i, inst in enumerate(sorted_base_dirs):
+def read_worlds(saves_dir: Path, *, allow_new: bool = False) -> list[World]:
+    """Save folders under ``saves_dir``.
 
-                    # Iterate through real existing worlds by the user
-                    try:
-                        if inst.is_dir():
-                            worlds.append({
-                                "path": inst,
-                                "name": inst.name,
-                                "last_played": int(inst.stat().st_mtime) if inst.exists() else None,
-                                "fake_world": False
-                            })
-                    except:
-                        pass
+    When ``allow_new`` is set, a synthetic "create a new world" entry is
+    appended so the loader can install into a profile that has no worlds yet.
+    """
+    worlds: list[World] = []
 
-                    # Add a fake entry used for New World making
-                    if add_world and i == last_index:
-                        worlds.append(add_fake_world(inst))
-            else:
-                worlds.append(add_fake_world(Path(base/"c2VsZWN0aW9uY2hhcmFjdGVyaXN0aWNtaWdodHlhbW91bnR2b2x1bWV6b295ZXRzdWk="))) # this is a random placeholder, do not touch, the function grabs the parent anyway
-
-
-            return self._format_worlds(worlds)
-
-        except Exception:
-            return worlds
-
-
-    # -------------------------
-    # MOD COMPAT
-    # -------------------------
-
-    def get_internal_profile_waypoints(self):
-
-        xaero_waypoints_path = Path(self.data["path"] / "xaero") 
-        if not xaero_waypoints_path:
-            return None
-        
-        xaero_minimap_path = Path(xaero_waypoints_path / "minimap")
-        xaero_worldmap_path = Path(xaero_waypoints_path / "world-map")
-
-        # check for matching directory names of children, if they appear in both dirs, add to list
-        xaero_instances = []
-        minimap_children = { p.name for p in xaero_minimap_path.iterdir() if p.is_dir() }
-        worldmap_children = { p.name for p in xaero_worldmap_path.iterdir() if p.is_dir() }
-        matching_instances = minimap_children.intersection(worldmap_children) # intersection = valid instances
-
-        for instance in sorted(matching_instances):
-            xaero_instances.append({
-                "name": instance,
-                "minimap_path": xaero_minimap_path / instance,
-                "worldmap_path": xaero_worldmap_path / instance
-                })
-
-        return xaero_instances
-
-
-    # -------------------------
-    # MODRINTH (SQLite)
-    # -------------------------
-
-    def _get_modrinth_profiles(self):
-        profiles = []
-
-        try:
-            conn = sqlite3.connect(self.source_path)
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT path, name, last_played FROM instances"
-            )
-            rows = cursor.fetchall()
-            conn.close()
-
-            for internal_name, name, last_played in rows:
-                
-                # Check if the directory actually exists (Modrinth doesn't properly synchronise records)
-                path = Path(os.environ["APPDATA"]) / "ModrinthApp" / "profiles" / internal_name
-                if not os.path.exists(path): continue
-
-                profiles.append({
-                    "path": path,
-                    "folder": internal_name,
-                    "name": name,
-                    "game_version": "Unavailable", # Modrinth removed this field from the DB.
-                    "mod_loader": "Unavailable", # Modrinth removed this field from the DB.
-                    "last_played": last_played,
-                })
-
-        except Exception as e:
-            print(f"Error reading Modrinth DB: {e}")
-
-        return profiles
-    
-    # -------------------------
-    # CURSEFORGE
-    # -------------------------
-
-    def _get_curseforge_profiles(self):
-        """
-        Scan a CurseForge Instances directory for instance folders and extract
-        profile info from minecraftinstance.json embedded inside each instance.
-
-        Returns a list of dicts with the same keys used by _get_modrinth_profiles:
-            {
-                "path": Path(...),        # path to the instance's mods folder (best-effort)
-                "folder": "...",          # instance folder name
-                "name": "...",            # friendly instance name
-                "game_version": "...",    # minecraft version string
-                "mod_loader": "...",      # mod loader string (forge/fabric/vanilla/etc)
-                "last_played": int|None,  # epoch seconds (best-effort)
-            }
-        """
-        profiles = []
-
-        try:
-            base = Path(self.source_path)
-            if not base.exists() or not base.is_dir():
-                return profiles
-
-            # Each instance is typically a directory under the Instances folder
-            for inst in sorted(base.iterdir()):
-                try:
-                    if not inst.is_dir():
-                        continue
-
-                    # Candidate locations for minecraftinstance.json
-                    candidates = [
-                        inst / "minecraftinstance.json",
-                        inst / "instance" / "minecraftinstance.json",
-                        inst / "config" / "minecraftinstance.json",
-                    ]
-
-                    # Also search shallowly if not found in common spots
-                    if not any(p.exists() for p in candidates):
-                        found = None
-                        for p in inst.rglob("minecraftinstance.json"):
-                            # prefer files not buried too deep
-                            if len(p.relative_to(inst).parts) <= 4:
-                                found = p
-                                break
-                        if found:
-                            candidates.insert(0, found)
-
-                    json_path = next((p for p in candidates if p.exists()), None)
-                    if not json_path:
-                        # No manifest found; still add a minimal profile using folder name
-                        profiles.append({
-                            "path": inst / "mods",
-                            "folder": inst.name,
-                            "name": inst.name,
-                            "game_version": "unknown",
-                            "mod_loader": "unknown",
-                            "last_played": int(inst.stat().st_mtime) if inst.exists() else None,
-                        })
-                        continue
-
-                    with json_path.open("r", encoding="utf-8") as fh:
-                        try:
-                            data = json.load(fh)
-                        except Exception:
-                            # If JSON is malformed, fall back to folder-based profile
-                            profiles.append({
-                                "path": inst / "mods",
-                                "folder": inst.name,
-                                "name": inst.name,
-                                "game_version": "unknown",
-                                "mod_loader": "unknown",
-                                "last_played": int(inst.stat().st_mtime) if inst.exists() else None,
-                            })
-                            continue
-
-                    # Extract fields with multiple fallbacks to be robust across versions
-                    name = (
-                        data.get("name")
-                        or data.get("instanceName")
-                        or data.get("displayName")
-                        or inst.name
-                    )
-
-                    # Common keys for Minecraft version vary; try several
-                    game_version = (
-                        data.get("minecraftVersion")
-                        or data.get("version")
-                        or data.get("mcVersion")
-                        or data.get("minecraft_version")
-                        or "unknown"
-                    )
-
-                    # Mod loader info can be stored under different keys
-                    mod_loader = (
-                        data.get("modLoader")
-                        or data.get("modLoaderType")
-                        or data.get("loader")
-                        or data.get("modloader")
-                        or data.get("mod_loader")
-                        or "unknown"
-                    )
-
-                    # last_played: try explicit field, else use folder mtime as epoch seconds
-                    last_played = None
-                    for key in ("lastPlayed", "last_played", "lastLaunch", "lastLaunchTime"):
-                        if key in data and data[key]:
-                            try:
-                                # some manifests store ms, some seconds — normalize heuristically
-                                val = int(data[key])
-                                if val > 10**12:  # milliseconds
-                                    val = val // 1000
-                                last_played = val
-                                break
-                            except Exception:
-                                pass
-                    if last_played is None:
-                        try:
-                            last_played = int(inst.stat().st_mtime)
-                        except Exception:
-                            last_played = None
-
-                    # Best-effort mods path (typical CurseForge instance layout)
-                    mods_path = inst / "mods"
-                    if not mods_path.exists():
-                        # some instances use 'minecraft/mods' or 'instance/mods'
-                        alt = inst / "minecraft" / "mods"
-                        if alt.exists():
-                            mods_path = alt
-                        else:
-                            mods_path = inst / "mods"  # keep default even if missing
-
-                    profiles.append({
-                        "path": mods_path,
-                        "folder": inst.name,
-                        "name": name,
-                        "game_version": str(game_version),
-                        "mod_loader": str(mod_loader),
-                        "last_played": last_played,
-                    })
-
-                except Exception:
-                    # Skip problematic instance but continue scanning others
+    if saves_dir.exists() and saves_dir.is_dir():
+        for entry in sorted(saves_dir.iterdir()):
+            try:
+                if not entry.is_dir():
                     continue
+                worlds.append(
+                    World(
+                        path=entry,
+                        name=entry.name,
+                        last_played=_epoch_to_date(int(entry.stat().st_mtime)),
+                        is_new=False,
+                    )
+                )
+            except OSError:
+                continue
 
-        except Exception as e:
-            print(f"Error reading Instances: {e}")
+    if allow_new:
+        worlds.append(
+            World(
+                path=saves_dir / NEW_WORLD_LABEL,
+                name=NEW_WORLD_LABEL,
+                last_played="never",
+                is_new=True,
+            )
+        )
 
+    return _format_worlds(worlds)
+
+
+def read_xaero_waypoints(profile_root: Path) -> list[dict]:
+    """Xaero minimap/world-map instances that exist in both folders.
+
+    Not currently wired into any menu -- the Xaero toggle only sets a flag.
+    Kept because the reader is correct and the feature is half-built.
+    """
+    xaero_root = profile_root / "xaero"
+    minimap_root = xaero_root / "minimap"
+    worldmap_root = xaero_root / "world-map"
+
+    if not minimap_root.is_dir() or not worldmap_root.is_dir():
+        return []
+
+    minimap = {p.name for p in minimap_root.iterdir() if p.is_dir()}
+    worldmap = {p.name for p in worldmap_root.iterdir() if p.is_dir()}
+
+    return [
+        {
+            "name": instance,
+            "minimap_path": minimap_root / instance,
+            "worldmap_path": worldmap_root / instance,
+        }
+        for instance in sorted(minimap & worldmap)
+    ]
+
+
+# -------------------------
+# region MODRINTH (SQLite)
+# -------------------------
+def _read_modrinth_profiles(manager: ModManager) -> list[Profile]:
+    profiles: list[Profile] = []
+    profiles_root = py_managers.modrinth_profiles_root()
+
+    try:
+        # read-only so we never take a write lock on the launcher's live DB
+        uri = f"file:{manager.db_path.as_posix()}?mode=ro"
+        with sqlite3.connect(uri, uri=True) as conn:
+            rows = conn.execute(
+                "SELECT path, name, last_played FROM instances"
+            ).fetchall()
+    except sqlite3.Error as exc:
+        print(f"Error reading Modrinth DB: {exc}")
         return profiles
 
+    for folder, name, last_played in rows:
+        root = profiles_root / folder
 
-    # -------------------------
-    # FORMATTER
-    # -------------------------
+        # Modrinth doesn't prune deleted instances from the DB.
+        if not root.exists():
+            continue
 
-    def _format_profiles(self, profiles):
-        """
-        Adds padding, converts timestamps, and builds display strings.
-        """
+        # Modrinth removed both fields from the schema, so the only remaining
+        # source is the game log -- which requires the profile to have been
+        # launched at least once. Unplayed profiles stay "Unavailable".
+        game = py_gamelog.read_game_info(root)
 
-        # Convert epoch → formatted date
-        for p in profiles:
-            if p["last_played"]:
-                dt = datetime.fromtimestamp(p["last_played"])
-                month = dt.strftime("%B")        # January, February, ...
-                day = dt.strftime("%d")          # 01, 02, ...
-                year = dt.strftime("%Y")         # 2025
-                p["last_played"] = f"{day} {month} {year}"
-            else:
-                p["last_played"] = "never"
-
-
-
-        # Determine padding widths
-        if len(profiles) > 0:
-            max_name = max(len(p["name"]) for p in profiles)
-            max_version = max(len(p["game_version"]) for p in profiles)
-            max_loader = max(len(p["mod_loader"]) for p in profiles)
-
-        # Build display strings
-        for p in profiles:
-            p["display"] = (
-                f"{p['name']:<{max_name}}   "
-                f"v{p['game_version']:<{max_version}}   "
-                f"{p['mod_loader']:<{max_loader}}   "
-                f"Last Played: {p['last_played']}"
+        profiles.append(
+            Profile(
+                root=root,
+                mods_dir=root / "mods",
+                saves_dir=root / "saves",
+                folder=folder,
+                name=name,
+                game_version=game.version,
+                mod_loader=game.loader,
+                last_played=_epoch_to_date(last_played),
             )
+        )
 
+    return profiles
+
+
+# -------------------------
+# region CURSEFORGE (JSON)
+# -------------------------
+_INSTANCE_JSON = "minecraftinstance.json"
+
+
+def _read_curseforge_profiles(manager: ModManager) -> list[Profile]:
+    profiles: list[Profile] = []
+    base = manager.profiles_path
+
+    if not base.exists() or not base.is_dir():
         return profiles
-    
 
-    def _format_worlds(self, worlds):
-        # Convert timestamps
-        for w in worlds:
-            if w["last_played"]:
-                dt = datetime.fromtimestamp(w["last_played"])
-                w["last_played"] = dt.strftime("%d %B %Y")
-            else:
-                w["last_played"] = "never"
+    for inst in sorted(base.iterdir()):
+        try:
+            if not inst.is_dir():
+                continue
+            profiles.append(_curseforge_profile(inst))
+        except OSError:
+            # Skip an unreadable instance rather than losing the whole list.
+            continue
 
-        # Padding
-        max_name = max(len(w["name"]) for w in worlds)
+    return profiles
 
-        # Build display
-        for w in worlds:
-            w["display"] = (
-                f"{w['name']:<{max_name}}   "
-                f"Last Played: {w['last_played']}"
-            )
 
+def _curseforge_profile(inst: Path) -> Profile:
+    data = _load_instance_json(inst)
+
+    mods_dir = inst / "mods"
+    root = inst
+    if not mods_dir.exists() and (inst / "minecraft" / "mods").exists():
+        root = inst / "minecraft"
+        mods_dir = root / "mods"
+
+    if not data:
+        # No manifest -- still offer the instance, named after its folder.
+        return Profile(
+            root=root,
+            mods_dir=mods_dir,
+            saves_dir=root / "saves",
+            folder=inst.name,
+            name=inst.name,
+            game_version="unknown",
+            mod_loader="unknown",
+            last_played=_epoch_to_date(_safe_mtime(inst)),
+        )
+
+    game_version = str(
+        _first_of(
+            data,
+            ("minecraftVersion", "version", "mcVersion", "minecraft_version"),
+            "unknown",
+        )
+    )
+    mod_loader = str(
+        _first_of(
+            data,
+            ("modLoader", "modLoaderType", "loader", "modloader", "mod_loader"),
+            "unknown",
+        )
+    )
+
+    # CurseForge manifests vary a lot by version and frequently omit the loader.
+    # Only pay for a log read when the JSON actually came up short.
+    if "unknown" in (game_version, mod_loader):
+        game = py_gamelog.read_game_info(root)
+        if game.found:
+            if game_version == "unknown":
+                game_version = game.version
+            if mod_loader == "unknown":
+                mod_loader = game.loader
+
+    return Profile(
+        root=root,
+        mods_dir=mods_dir,
+        saves_dir=root / "saves",
+        folder=inst.name,
+        name=_first_of(data, ("name", "instanceName", "displayName"), inst.name),
+        game_version=game_version,
+        mod_loader=mod_loader,
+        last_played=_epoch_to_date(_curseforge_last_played(data, inst)),
+    )
+
+
+def _load_instance_json(inst: Path) -> dict:
+    candidates = [
+        inst / _INSTANCE_JSON,
+        inst / "instance" / _INSTANCE_JSON,
+        inst / "config" / _INSTANCE_JSON,
+    ]
+
+    json_path = next((p for p in candidates if p.exists()), None)
+
+    if json_path is None:
+        # Shallow search as a fallback; don't descend into the whole instance.
+        for found in inst.rglob(_INSTANCE_JSON):
+            if len(found.relative_to(inst).parts) <= 4:
+                json_path = found
+                break
+
+    if json_path is None:
+        return {}
+
+    try:
+        with json_path.open("r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+    return data if isinstance(data, dict) else {}
+
+
+def _curseforge_last_played(data: dict, inst: Path) -> int | None:
+    for key in ("lastPlayed", "last_played", "lastLaunch", "lastLaunchTime"):
+        raw = data.get(key)
+        if not raw:
+            continue
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            continue
+        # Some manifests store milliseconds.
+        return value // 1000 if value > 10**12 else value
+
+    return _safe_mtime(inst)
+
+
+def _first_of(data: dict, keys: tuple[str, ...], default):
+    for key in keys:
+        if data.get(key):
+            return data[key]
+    return default
+
+
+def _safe_mtime(path: Path) -> int | None:
+    try:
+        return int(path.stat().st_mtime)
+    except OSError:
+        return None
+
+
+# -------------------------
+# region FORMATTING
+# -------------------------
+def _epoch_to_date(epoch: int | None) -> str:
+    if not epoch:
+        return "never"
+    try:
+        return datetime.fromtimestamp(epoch).strftime("%d %B %Y")
+    except (OSError, OverflowError, ValueError):
+        return "never"
+
+
+def _format_profiles(profiles: list[Profile]) -> list[Profile]:
+    if not profiles:
+        return profiles
+
+    name_width = max(len(p.name) for p in profiles)
+    version_width = max(len(p.game_version) for p in profiles)
+    loader_width = max(len(p.mod_loader) for p in profiles)
+
+    for p in profiles:
+        p.display = (
+            f"{p.name:<{name_width}}   "
+            f"v{p.game_version:<{version_width}}   "
+            f"{p.mod_loader:<{loader_width}}   "
+            f"Last Played: {p.last_played}"
+        )
+
+    return profiles
+
+
+def _format_worlds(worlds: list[World]) -> list[World]:
+    if not worlds:
         return worlds
 
+    name_width = max(len(w.name) for w in worlds)
+
+    for w in worlds:
+        w.display = f"{w.name:<{name_width}}   Last Played: {w.last_played}"
+
+    return worlds
