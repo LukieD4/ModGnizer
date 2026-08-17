@@ -1,6 +1,9 @@
 # Gnizer
 
-A Minecraft Mod Organizer
+A Minecraft Mod Organiser.
+
+<img width="2352" height="1232" alt="image" src="https://github.com/user-attachments/assets/0e5cf4ca-df40-4d37-ac5b-53a61639ae6c" />
+
 
 ## TL;DR
 
