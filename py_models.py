@@ -19,6 +19,15 @@ INSTALL_MODLIST = "modlist"
 INSTALL_SAVEFOLDER = "savefolder"
 INSTALL_UNKNOWN = "unknown"
 
+# Bytes per uploaded part. This lives here rather than in py_tmpfiles because
+# it is no longer only a transport detail: py_manifest derives how many parts a
+# share of a given size must have, and py_tmpfiles checks each downloaded part
+# against it. Those checks are only as good as their agreement with the size
+# actually used to split, so there is exactly one constant. It used to be
+# written out twice -- py_tmpfiles.DEFAULT_CHUNK_SIZE and a separate
+# py_actions.UPLOAD_CHUNK_SIZE that was passed in to override it.
+UPLOAD_CHUNK_SIZE = 90 * 1024 * 1024
+
 
 # -------------------------
 # region DOMAIN

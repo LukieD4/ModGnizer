@@ -16,9 +16,11 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 import zipfile
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -315,6 +317,73 @@ def write_md5_file(md5_map: dict[str, str], target: Path,
             if pad_bytes:
                 fh.write(os.urandom(pad_bytes).hex() + "\n")
     return target
+
+
+# One "<md5>  <relative path>" entry. The random hex write_md5_file pads with
+# is a single unbroken run of characters, so it can never match this.
+_MD5_LINE_RE = re.compile(r"^([0-9a-fA-F]{32})  (.+)$")
+
+
+def _normalise_rel_path(rel_path: str) -> str:
+    """Key the same file to the same string on both ends of a share.
+
+    generate_md5_map builds keys with os separators while an archiver may have
+    stored forward slashes, and Windows does not distinguish case -- comparing
+    the raw strings reports differences that aren't there.
+    """
+    return rel_path.strip().replace("\\", "/").lower()
+
+
+def read_md5_file(path: Path) -> dict[str, str]:
+    """Parse a listing written by ``write_md5_file`` back into a map.
+
+    Lines that aren't entries -- the padding, or anything a chat client
+    mangled -- are skipped rather than failing the read, so a listing degrades
+    to "fewer files covered", never to "cannot check anything".
+    """
+    md5_map: dict[str, str] = {}
+
+    for line in Path(path).read_text(encoding="utf-8", errors="replace").splitlines():
+        match = _MD5_LINE_RE.match(line.rstrip())
+        if match:
+            md5_map[_normalise_rel_path(match.group(2))] = match.group(1).lower()
+
+    return md5_map
+
+
+@dataclass(frozen=True)
+class HashComparison:
+    """How an extracted folder differs from the listing that describes it."""
+
+    changed: list[str]
+    extra: list[str]
+    missing: list[str]
+
+    @property
+    def ok(self) -> bool:
+        return not (self.changed or self.extra or self.missing)
+
+
+def compare_md5_maps(expected: dict[str, str],
+                     actual: dict[str, str]) -> HashComparison:
+    """Compare a recorded MD5 listing against one taken from disk.
+
+    MD5 is here because it is the format already being written and shared, and
+    it is doing the job of spotting files that were substituted wholesale --
+    not of resisting an attacker who can craft a collision for a specific mod
+    jar. Worth replacing with SHA-256 whenever the listing format can change.
+    """
+    expected = {_normalise_rel_path(k): v.lower() for k, v in expected.items()}
+    actual = {_normalise_rel_path(k): v.lower() for k, v in actual.items()}
+
+    return HashComparison(
+        changed=sorted(
+            key for key in expected.keys() & actual.keys()
+            if expected[key] != actual[key]
+        ),
+        extra=sorted(actual.keys() - expected.keys()),
+        missing=sorted(expected.keys() - actual.keys()),
+    )
 
 
 def explain_exit_code(error: ArchiveError, *, during: str = "extraction") -> str:

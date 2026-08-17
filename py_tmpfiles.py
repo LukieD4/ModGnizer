@@ -7,6 +7,11 @@ bytes. Two fixes worth naming:
   path, which is a *URL string* wrapped in a Path, not a file that exists. It
   now returns the file it actually downloaded.
 * A single-link manifest indexed ``downloaded_parts[1]`` and raised IndexError.
+* Parts were concatenated at whatever size they arrived. A split produces
+  full-size parts with one short tail, so ``download_manifest`` now holds each
+  part to that shape (py_secure.check_payload_sizes) -- a part appended to a
+  share leaves a short one in the middle, which is caught before the appended
+  part is even fetched.
 
 Note on the upload site: as of 07/08/2026 tmpfiles.org no longer lets you build
 the /dl/ URL by string substitution -- an ID is injected at upload time and is
@@ -30,6 +35,8 @@ from urllib.parse import urlparse
 import requests
 
 import py_paths
+import py_secure
+from py_models import UPLOAD_CHUNK_SIZE
 from py_ui import format_bytes
 
 # Per https://tmpfiles.org/api the upload endpoint accepts:
@@ -47,8 +54,13 @@ EXPIRY_MAX_SECONDS = 172800
 
 # Hard server-side cap on a single upload. DEFAULT_CHUNK_SIZE must stay below
 # it, otherwise every split part is rejected with an opaque HTTP error.
+#
+# The chunk size itself now lives in py_models: both the part count a manifest
+# is allowed to declare and the size each downloaded part is checked against
+# are derived from it, and a second copy of the number is a second thing to
+# forget to change.
 MAX_UPLOAD_BYTES = 100 * 1024 * 1024
-DEFAULT_CHUNK_SIZE = 90 * 1024 * 1024
+DEFAULT_CHUNK_SIZE = UPLOAD_CHUNK_SIZE
 
 # A transfer only counts toward the speed estimate once it lasted this long.
 # The MD5 archive is tiny and can arrive inside one buffered read, which would
@@ -58,6 +70,15 @@ MIN_RELIABLE_TRANSFER_SECONDS = 0.025
 
 class TmpFilesError(Exception):
     """Raised for tmpfiles.org upload/download errors."""
+
+
+class TamperedShareError(TmpFilesError):
+    """What came down the wire isn't what the share block described.
+
+    A subclass, so every existing handler still catches it -- but this is not
+    a transfer failure and callers that report it shouldn't say "download
+    failed" when the download went perfectly.
+    """
 
 
 @dataclass(frozen=True)
@@ -291,6 +312,13 @@ class TmpFilesClient:
             parts.append(part)
             downloaded_bytes += part_size
 
+            # Checked as we go, not just at the end: an appended part shows up
+            # as the *previous* part being short, so this fails one part before
+            # the added one would have been fetched.
+            self._verify_payload_sizes(
+                [p.stat().st_size for p in parts[1:]], total_parts - 1
+            )
+
             if transfer_seconds >= MIN_RELIABLE_TRANSFER_SECONDS:
                 sample_bytes += part_size
                 sample_seconds += transfer_seconds
@@ -300,10 +328,36 @@ class TmpFilesClient:
         hash_archive = parts[0]
         payload_parts = parts[1:]
 
+        self._verify_payload_sizes(
+            [part.stat().st_size for part in payload_parts],
+            len(payload_parts),
+            declared_total=expected_bytes,
+        )
+
         if len(payload_parts) == 1:
             return hash_archive, payload_parts[0]
 
         return hash_archive, self._reassemble(payload_parts, manifest.internal_name)
+
+    @staticmethod
+    def _verify_payload_sizes(sizes: list[int], expected_parts: int,
+                              declared_total: int | None = None) -> None:
+        """Refuse a payload whose parts aren't the shape a split produces."""
+        known: list[int | None] = list(sizes)
+        known += [None] * (expected_parts - len(known))
+
+        problems = py_secure.check_payload_sizes(
+            known, DEFAULT_CHUNK_SIZE, declared_total
+        )
+        if not problems:
+            return
+
+        raise TamperedShareError(
+            "The downloaded parts are not the size this share says they are, "
+            "so it is not\nthe file your friend bundled:\n  - "
+            + "\n  - ".join(problems)
+            + "\nAsk your friend to re-send the whole block."
+        )
 
     def _reassemble(self, parts: list[Path], internal_name: str | None) -> Path:
         target = parts[0].parent / (internal_name or "reassembled_file")

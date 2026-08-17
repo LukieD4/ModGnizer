@@ -19,12 +19,14 @@ from py_imports import Fore
 from py_models import (
     INSTALL_MODLIST,
     INSTALL_SAVEFOLDER,
+    UPLOAD_CHUNK_SIZE,
     ArchivePrefs,
     Context,
     Result,
 )
 
-UPLOAD_CHUNK_SIZE = 90 * 1024 * 1024
+# How many offending files a hash report lists before it summarises the rest.
+HASH_REPORT_LIMIT = 10
 
 
 # -------------------------
@@ -255,7 +257,7 @@ def load_data(ctx: Context) -> Result:
     py_ui.info(f"Found {len(manifest.links)} part(s). Downloading to temp ...")
 
     # // Lazy import -- pulls in requests
-    from py_tmpfiles import TmpFilesClient, TmpFilesError
+    from py_tmpfiles import TamperedShareError, TmpFilesClient, TmpFilesError
 
     try:
         client = TmpFilesClient(timeout=120)
@@ -269,7 +271,13 @@ def load_data(ctx: Context) -> Result:
         if order is not None:
             return order
 
-        _hash_archive, payload_archive = client.download_manifest(manifest, metas)
+        hash_archive, payload_archive = client.download_manifest(manifest, metas)
+    except TamperedShareError as exc:
+        # Not a transfer problem -- the bytes arrived, they're just not the
+        # ones this share claims to be made of. Caught before TmpFilesError
+        # below, which it subclasses.
+        ctx.log.exception(exc)
+        return Result.error(str(exc))
     except TmpFilesError as exc:
         ctx.log.exception(exc)
         if "HTTP 404" in str(exc):
@@ -290,6 +298,13 @@ def load_data(ctx: Context) -> Result:
         )
 
     print("Nearly there ...")
+
+    verdict = _verify_payload_hashes(
+        ctx, manifest, hash_archive, extracted_path, password
+    )
+    if verdict is not None:
+        return verdict
+
     verdict = _verify_contents(extracted_path, manifest.install_type)
     if verdict is not None:
         return verdict
@@ -344,6 +359,116 @@ def _check_upload_order(ctx: Context, metas) -> Result | None:
         return Result.error("Aborted: share parts are out of upload order.")
 
     return None
+
+
+def _verify_payload_hashes(ctx: Context, manifest, hash_archive: Path,
+                           extracted_path: Path,
+                           password: str | None) -> Result | None:
+    """Check the extracted files against the MD5 listing the sender uploaded.
+
+    Gnizer builds that listing, uploads it before anything else and puts it at
+    links[0] -- and then the loader dropped it (``_hash_archive, payload =
+    ...``), so the one thing tying a share's *contents* to what the sender
+    bundled was downloaded on every single install and never opened. The link
+    checks in py_manifest can only vouch for the parts being the ones the
+    header describes; this is what notices when the bytes inside them aren't.
+
+    No use against a hostile sender, who writes the listing to match whatever
+    they sent. What it does is stop anyone tampering with *someone else's*
+    share at one line of the block: they now have to replace the hash archive
+    too, and a replacement has to be uploaded after the fact, which puts the
+    newest part at the top of a list check_upload_order requires to get
+    younger downwards.
+
+    Returns a Result to abort, or None to carry on.
+    """
+    try:
+        listing_dir = py_archive.extract_archive(hash_archive, password=password)
+    except py_archive.ArchiveError as exc:
+        ctx.log.exception(exc)
+        return Result.error(
+            "Could not open this share's hash listing: "
+            + py_archive.explain_exit_code(exc, during="extraction")
+        )
+
+    expected_listing = f"{manifest.internal_name}.md5.txt"
+    listing = next(
+        (path for path in listing_dir.rglob("*.md5.txt")
+         if path.name.lower() == expected_listing.lower()),
+        None,
+    )
+
+    if listing is None:
+        return Result.error(
+            f"This share's hash archive doesn't describe '{manifest.internal_name}' "
+            "-- it belongs to a different share.\n"
+            "Ask your friend to re-send the whole block."
+        )
+
+    recorded = py_archive.read_md5_file(listing)
+    if not recorded:
+        return Result.error(
+            "This share's hash listing is empty, so the download can't be "
+            "checked.\nAsk your friend to rebundle."
+        )
+
+    comparison = py_archive.compare_md5_maps(
+        recorded, py_archive.generate_md5_map(extracted_path)
+    )
+
+    ctx.log.info(
+        f"HASH CHECK -> {len(recorded)} recorded, {len(comparison.changed)} "
+        f"changed, {len(comparison.extra)} extra, {len(comparison.missing)} missing"
+    )
+
+    if comparison.ok:
+        py_ui.note(f"[ok] All {len(recorded)} files match the sender's MD5 listing.")
+        return None
+
+    # Files that changed or that nobody hashed are the direction that can hurt
+    # you -- that is what an injected mod looks like. Files that are merely
+    # absent cannot, and archivers do legitimately skip things (hidden and
+    # system files), so those are worth a warning rather than a refusal.
+    if comparison.changed or comparison.extra:
+        print("\n" + py_ui.DIVIDER)
+        py_ui.error(
+            "The files in this download do not match the share's own MD5 listing."
+        )
+        _print_hash_section(Fore.RED, "Contents differ", comparison.changed)
+        _print_hash_section(Fore.RED, "Not in the listing at all", comparison.extra)
+        py_ui.pause(
+            Fore.RED
+            + "Someone has altered this share after your friend created it."
+            "\n > Press ENTER to return back to the main menu"
+        )
+        return Result.error("Share contents did not match the sender's hash listing.")
+
+    print("\n" + py_ui.DIVIDER)
+    py_ui.warn("Some files in this share's MD5 listing were not in the download:")
+    _print_hash_section(Fore.YELLOW, "Missing", comparison.missing)
+
+    if not py_ui.ask_consent(
+        Fore.YELLOW
+        + "Everything that did arrive matches.\n-> Do you still want to install"
+    ):
+        return Result.info("Installation cancelled.")
+
+    return None
+
+
+def _print_hash_section(colour: str, title: str, paths: list[str]) -> None:
+    """py_ui.print_section, but capped -- a bad share can name every file."""
+    if not paths:
+        return
+
+    print(colour + f"{title} ({len(paths)}):")
+    for path in paths[:HASH_REPORT_LIMIT]:
+        print(Fore.LIGHTBLACK_EX + f"  - {path}")
+
+    if len(paths) > HASH_REPORT_LIMIT:
+        print(Fore.LIGHTBLACK_EX + f"  ... and {len(paths) - HASH_REPORT_LIMIT} more")
+
+    print()
 
 
 def _verify_contents(extracted_path: Path, declared_type: str) -> Result | None:

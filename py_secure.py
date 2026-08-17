@@ -95,6 +95,56 @@ def check_upload_order(parts):
     )
 
 
+# -------------------------
+# region PART SIZES
+# -------------------------
+def check_payload_sizes(sizes, chunk_size, declared_total=None):
+    """Verify the payload parts are the shape a split of one file produces.
+
+    ``sizes`` is the payload part sizes in share order, ``None`` for parts not
+    downloaded yet, so this can be called after each part as well as at the
+    end.
+
+    TmpFilesClient._split_into_parts reads fixed-size chunks until the file
+    runs out, so every part except the last is exactly ``chunk_size`` and only
+    the last is short. That invariant is what catches a part being *added*:
+    the part that used to be last is a short tail, and appending anything
+    after it leaves a short part in the middle of the list. It costs nothing
+    to check and it does not depend on the header being honest -- unlike the
+    total, which an attacker can edit to match whatever they appended.
+
+    Returns a list of problems; empty means nothing looks wrong.
+    """
+    problems = []
+    last = len(sizes) - 1
+
+    for index, size in enumerate(sizes):
+        if size is None:
+            continue
+
+        if index < last and size != chunk_size:
+            problems.append(
+                f"Payload part {index + 1} is {size:,} bytes, but every part "
+                f"except the last must be exactly {chunk_size:,}. A part has "
+                "been inserted after it, or it is not the part it claims to be."
+            )
+        elif index == last and size > chunk_size:
+            problems.append(
+                f"Payload part {index + 1} is {size:,} bytes, over the "
+                f"{chunk_size:,} byte limit Gnizer uploads in."
+            )
+
+    if declared_total is not None and all(size is not None for size in sizes):
+        total = sum(sizes)
+        if total != declared_total:
+            problems.append(
+                f"The parts add up to {total:,} bytes, but this share says it "
+                f"is {declared_total:,}."
+            )
+
+    return problems
+
+
 def _scan_extracted_folder(root_path, whitelist):
     """
     Scans folder and returns:
